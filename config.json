@@ -1,0 +1,27 @@
+{
+  "server": "192.168.2.20:3483",
+  "players": [
+    {
+      "name": "FamilyRoom2",
+      "mac": "b8:e9:37:28:ae:dc",
+      "volume_offset": 0,
+      "volume_max": 100,
+      "buffer_seconds": 0,
+      "http_port": 30000,
+      "devicename": "Family Room - Sonos Play:5 Media Renderer",
+      "ip": "192.168.2.110",
+      "model": "Sonos, Inc. Sonos Play:5"
+    },
+    {
+      "name": "SunL",
+      "mac": "94:9f:3e:8f:63:0c",
+      "volume_offset": -20,
+      "volume_max": 70,
+      "buffer_seconds": 0,
+      "http_port": 30001,
+      "devicename": "SunRoomL - Sonos Play:1 Media Renderer - RINCON_949F3E8F630C01400",
+      "ip": "192.168.2.174",
+      "model": "Sonos, Inc. Sonos Play:1"
+    }
+  ]
+}

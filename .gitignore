@@ -1,0 +1,6 @@
+dist/
+*.exe
+*.gz
+
+
+*.prof

@@ -1,0 +1,93 @@
+# GoSlim suite
+
+Squeezebox (Slimproto) players for Lyrion / Logitech Media Server, written in Go.
+
+| Command | What it does |
+|---|---|
+| `goslimplayer` | Plays on the local sound device, or with `-u config.json` presents each UPnP/Sonos renderer in the file to LMS as its own player and streams straight to it. |
+| `goslim` | Plays locally, or with `-proxyport` accepts `goupnpaudioclient` connections and presents each as a player. |
+| `goupnpaudioclient` | Lists UPnP renderers; with `-m MAC` streams a GoSlim proxy player to that renderer. |
+
+`goslimplayer` supersedes the other two for most uses; they remain for the proxy setup.
+
+## Layout
+
+```
+cmd/<app>/          main.go (version + startup), flags.go (command line), playback.go (what the app does)
+internal/app        process harness: version banner, logging, SIGINT/SIGTERM -> context
+internal/lms        finds the LMS server once and shares it between players
+internal/player     the Slimproto client: protocol, track queue, ReplayGain, track-change log
+internal/decode     MP3, FLAC, WAV/AIFF/raw PCM, optional ffmpeg (AAC/ALAC), resampler
+internal/audio      local sound output (oto); a stub when built with -tags noaudio
+internal/upnp       renderer discovery, SOAP control, diagnostics, the HTTP stream and pacer
+internal/upnpout    feeds a player's audio to a UPnP renderer (goslimplayer)
+internal/config     the config file and the -jsonfile generator
+internal/proxyproto the wire protocol between goslim and goupnpaudioclient
+internal/proxy      goslim's proxy mode
+internal/uclient    goupnpaudioclient's engine
+hack/               build.sh, build.bat, itest.py
+deploy/             systemd units, NSSM install script
+dist/               build output (git-ignored)
+```
+
+## Building
+
+### Linux
+```
+hack/build.sh                       # every app, Windows amd64/386, Linux amd64/arm64, macOS arm64/amd64 -> dist/
+VERSION=1.2.3 hack/build.sh         # default version: git describe, else "dev"
+APPS=goslimplayer TARGETS="linux/arm64" hack/build.sh
+```
+### Windows
+```
+hack\build.bat                      # Windows 64/32-bit
+In Powershell, set the version as follows
+$env:VERSION = "1.2.3"
+.\hack\build.bat
+In a cmd prompt, you can set the version as follows.
+set "VERSION=1.2.3" && hack\build.bat
+```
+
+The scripts inject the version with `-ldflags "-s -w -X main.version=${VERSION}"`; every program prints it at
+startup and with `-version`. Linux and macOS outputs are gzipped as `dist/<app>-<version>-<os>-<arch>.gz`,
+Windows ones stay `.exe`. The first build runs `go mod tidy` to fetch the dependencies.
+
+**Local audio** uses [oto](https://github.com/ebitengine/oto). It builds without cgo on Windows and macOS. On
+Linux it needs cgo and the ALSA headers, so `build.sh` makes the Linux binaries with `-tags noaudio` (UPnP and
+proxy modes only, which is what a headless service wants). For local playback on Linux build natively with
+`sudo apt install libasound2-dev` and `LINUX_AUDIO=1 hack/build.sh`.
+
+## Config file (goslimplayer -u)
+
+```json
+{
+  "server": "192.168.2.20:3483",
+  "players": [
+    { "name": "FamilyRoom", "mac": "b8:e9:37:28:ae:dc" },
+    { "name": "SunL", "mac": "94:9f:3e:8f:63:0c",
+      "volume_offset": -20, "volume_max": 70, "buffer_seconds": 15, "http_port": 30001 }
+  ]
+}
+```
+
+`goslimplayer -jsonfile` lists the renderers and writes a skeleton. Every entry needs the `name` key (it may be
+empty to use the renderer's own name) and a `mac`. `server` is optional; without it, and without `-server`, LMS
+is found by broadcast once and shared by all players.
+
+## Running as a service
+
+The programs stop cleanly on SIGINT/SIGTERM: they leave LMS, stop the speakers and exit within seconds. That is
+what systemd sends, and what NSSM sends a console program, so no service-specific code is needed.
+
+* **Linux**: `deploy/goslimplayer.service` (steps in its header). Logs go to `journalctl -u goslimplayer`.
+* **Windows**: edit `INSTALLDIR` in `deploy/install-nssm.bat` and run it as administrator.
+
+Use UPnP mode for services. A Windows service runs in session 0 and may not reach the sound card, so local
+playback is best run as a normal program there.
+
+## Testing
+
+```
+go test ./...                       # unit tests, including a fake-renderer end-to-end test of goslimplayer's output
+python3 hack/itest.py ./goslim      # end-to-end test of proxy mode against a fake LMS (see the file's header)
+```

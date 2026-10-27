@@ -1,0 +1,45 @@
+# systemd unit for GoSlimPlayer driving UPnP/Sonos renderers (no local audio needed).
+#
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin goslim
+#   sudo install -d /opt/goslimplayer /etc/goslimplayer
+#   sudo install goslimplayer /opt/goslimplayer/            (gunzip the release file first)
+#   sudo install -m 640 -o root -g goslim config.json /etc/goslimplayer/
+#   sudo cp goslimplayer.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now goslimplayer
+#   journalctl -u goslimplayer -f
+[Unit]
+Description=GoSlimPlayer - Squeezebox player presenting UPnP renderers to Lyrion Music Server
+After=network-online.target
+# Keep restarting for as long as it takes (the default gives up after 5 starts in 10 s).
+StartLimitIntervalSec=0
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=goslim
+Group=goslim
+# systemd adds its own timestamps, so turn ours off.
+ExecStart=/opt/goslimplayer/goslimplayer -u /etc/goslimplayer/config.json -logtime=false -exitonnetfail
+# systemd sends SIGTERM; the program leaves LMS, stops the speakers and exits within a few seconds.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+# -exitonnetfail makes the program exit with an error when a renderer cannot reach its stream (firewall,
+# wrong network); on-failure then restarts it every RestartSec until the network is right again.
+Restart=on-failure
+RestartSec=5
+
+# Hardening: it only needs the network.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+# Netlink is needed to list the network interfaces (SSDP and LMS discovery send from each one).
+# If you still have discovery problems, add AF_PACKET as well.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,36 @@
+# systemd unit for GoSlim in proxy mode: it waits for GoUPnPAudioClient connections
+# and presents each one to Lyrion Music Server as a player.
+#
+# For local playback on the sound card instead, build with LINUX_AUDIO=1 (hack/build.sh),
+# replace -proxyport 3434 with -server <LMS host> and add:
+#   SupplementaryGroups=audio
+# and remove PrivateDevices=true.
+[Unit]
+Description=GoSlim - Squeezebox player (UPnP proxy mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=goslim
+Group=goslim
+ExecStart=/opt/goslim/goslim -proxyport 3434 -logtime=false
+KillSignal=SIGTERM
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+# Netlink is needed to list the network interfaces (SSDP and LMS discovery send from each one).
+# If you still have discovery problems, add AF_PACKET as well.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
