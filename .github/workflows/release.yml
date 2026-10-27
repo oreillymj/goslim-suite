@@ -10,6 +10,13 @@ name: Release
 #
 # A draft release does not start it (nothing is published until you click "Publish release").
 # The workflow file must exist in the commit the tag points to.
+
+# Check for the latest version of actions.
+# https://github.com/orgs/actions/repositories?type=all
+# https://github.com/actions/checkout/releases
+# https://github.com/actions/download-artifact/releases
+# https://github.com/actions/upload-artifact
+
 on:
   release:
     types: [published]
@@ -31,7 +38,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       - name: Install zip
         run: apt-get update && apt-get install -y --no-install-recommends zip
@@ -76,7 +83,7 @@ jobs:
           done
           ls -l dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: binaries
           path: dist/*
@@ -87,9 +94,9 @@ jobs:
     permissions:
       contents: write   # required to create or update the release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: binaries
           path: dist
