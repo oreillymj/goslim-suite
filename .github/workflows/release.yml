@@ -1,41 +1,80 @@
 name: Release
 
+# Builds every app for Windows, Linux and macOS and attaches the files to a GitHub release.
+#
+# It starts when
+#   - a release is published (GitHub web UI, `gh release create`, API) - pre-releases too, or
+#   - a tag v* is pushed (`git tag v1.2.3 && git push origin v1.2.3`).
+# Publishing a release from the UI creates its tag as well, so both events can arrive at once;
+# the concurrency group keeps only the latest of them running.
+#
+# A draft release does not start it (nothing is published until you click "Publish release").
+# The workflow file must exist in the commit the tag points to.
 on:
+  release:
+    types: [published]
   push:
     tags:
       - "v*"
 
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
+
 env:
-  APP: myapp
-  PKG: ./cmd/myapp   # use "." if main.go is in the repo root
+  NAME: goslim            # used for the source archive name
 
 jobs:
   build:
     runs-on: ubuntu-latest
     container: golang:1.26-bookworm   # build happens inside this Docker image
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
       - name: Install zip
         run: apt-get update && apt-get install -y --no-install-recommends zip
 
+      - name: Fetch dependencies
+        run: go mod tidy
+
+      # Every app for every platform, as static binaries (CGO_ENABLED=0). The Linux builds use
+      # -tags noaudio (UPnP and proxy modes only; local audio on Linux needs cgo and ALSA).
+      # Windows binaries are zipped, Linux and macOS ones gzipped, as hack/build.sh does.
       - name: Build static binaries
         env:
           CGO_ENABLED: "0"
           VERSION: ${{ github.ref_name }}
         run: |
-          mkdir -p dist
+          set -eu
           LDFLAGS="-s -w -X main.version=${VERSION}"
-
-          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$LDFLAGS" \
-            -o dist/${APP} ${PKG}
-          gzip -9 -c dist/${APP} > dist/${APP}-${VERSION}-linux-amd64.gz
-          rm dist/${APP}
-
-          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "$LDFLAGS" \
-            -o dist/${APP}.exe ${PKG}
-          (cd dist && zip ${APP}-${VERSION}-windows-amd64.zip ${APP}.exe)
-          rm dist/${APP}.exe
+          APPS="goslimplayer goslim goupnpaudioclient"
+          TARGETS="windows/amd64 windows/386 linux/amd64 linux/arm64 darwin/arm64 darwin/amd64"
+          mkdir -p dist
+          for APP in $APPS; do
+            for target in $TARGETS; do
+              GOOS="${target%/*}"
+              GOARCH="${target#*/}"
+              EXT=""; TAGS=""
+              [ "$GOOS" = "windows" ] && EXT=".exe"
+              [ "$GOOS" = "linux" ] && TAGS="noaudio"
+              OUT="${APP}-${VERSION}-${GOOS}-${GOARCH}"
+              echo "==> ${OUT}${TAGS:+  (tags: ${TAGS})}"
+              GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -tags "$TAGS" -ldflags "$LDFLAGS" \
+                -o "dist/${OUT}${EXT}" "./cmd/${APP}"
+              if [ "$GOOS" = "windows" ]; then
+                # store the executable under its plain name inside the zip
+                mv "dist/${OUT}.exe" "dist/${APP}.exe"
+                (cd dist && zip -q "${OUT}.zip" "${APP}.exe")
+                rm "dist/${APP}.exe"
+              else
+                gzip -9 -c "dist/${OUT}" > "dist/${OUT}.gz"
+                rm "dist/${OUT}"
+              fi
+            done
+          done
+          ls -l dist
 
       - uses: actions/upload-artifact@v4
         with:
@@ -46,7 +85,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # required to create the release
+      contents: write   # required to create or update the release
     steps:
       - uses: actions/checkout@v4
 
@@ -55,13 +94,17 @@ jobs:
           name: binaries
           path: dist
 
-      - name: Create source archive
+      - name: Create source archive and checksums
         run: |
           git archive --format=tar.gz \
-            --prefix=${APP}-${{ github.ref_name }}/ \
-            -o dist/${APP}-${{ github.ref_name }}-src.tar.gz HEAD
+            --prefix=${NAME}-${{ github.ref_name }}/ \
+            -o dist/${NAME}-${{ github.ref_name }}-src.tar.gz HEAD
+          (cd dist && sha256sum * > SHA256SUMS.txt)
 
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
+          # keep a release made as a pre-release in the UI a pre-release; for a bare tag,
+          # a name with a hyphen (v1.2.0-rc1) is treated as one
+          prerelease: ${{ github.event.release.prerelease || contains(github.ref_name, '-') }}
