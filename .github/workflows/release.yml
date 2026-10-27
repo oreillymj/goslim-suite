@@ -17,6 +17,8 @@ name: Release
 # https://github.com/actions/download-artifact/releases
 # https://github.com/actions/upload-artifact
 
+# https://github.com/softprops/action-gh-release/releases/tag/v3.0.3
+
 on:
   release:
     types: [published]
@@ -108,7 +110,7 @@ jobs:
             -o dist/${NAME}-${{ github.ref_name }}-src.tar.gz HEAD
           (cd dist && sha256sum * > SHA256SUMS.txt)
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3.0.3
         with:
           files: dist/*
           generate_release_notes: true
