@@ -68,7 +68,7 @@ jobs:
               [ "$GOOS" = "linux" ] && TAGS="noaudio"
               OUT="${APP}-${VERSION}-${GOOS}-${GOARCH}"
               echo "==> ${OUT}${TAGS:+  (tags: ${TAGS})}"
-              GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -tags "$TAGS" -ldflags "$LDFLAGS" \
+              GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -buildvcs=false -tags "$TAGS" -ldflags "$LDFLAGS" \
                 -o "dist/${OUT}${EXT}" "./cmd/${APP}"
               if [ "$GOOS" = "windows" ]; then
                 # store the executable under its plain name inside the zip
