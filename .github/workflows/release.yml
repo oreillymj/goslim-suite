@@ -50,6 +50,8 @@ jobs:
 
       # Every app for every platform, as static binaries (CGO_ENABLED=0). The Linux builds use
       # -tags noaudio (UPnP and proxy modes only; local audio on Linux needs cgo and ALSA).
+      # -buildvcs=false: in a container job git refuses the checkout ("dubious ownership"), and go build
+      # then fails with "error obtaining VCS status". The version is injected with -ldflags anyway.
       # Windows binaries are zipped, Linux and macOS ones gzipped, as hack/build.sh does.
       - name: Build static binaries
         env:

@@ -8,9 +8,12 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
+	"time"
 )
 
 var (
@@ -76,12 +79,45 @@ type zgState struct {
 	Groups []zgGroup `xml:"ZoneGroups>ZoneGroup"`
 }
 
-func printMember(m zgMember, indent string, self string) {
+// sonosUUIDMAC extracts the MAC from a Sonos UUID (RINCON_<12 hex digits>01400).
+var sonosUUIDMAC = regexp.MustCompile(`^RINCON_([0-9A-Fa-f]{12})\d{5}$`)
+
+// memberMAC finds the MAC address to give -m for a zone group member: the one
+// the network reports for its address (as discovery does), else the one that is
+// part of its Sonos UUID.
+func memberMAC(m zgMember) string {
+	if u, err := url.Parse(m.Location); err == nil && u.Hostname() != "" {
+		if c, err := net.DialTimeout("tcp", u.Host, time.Second); err == nil { // makes sure the ARP entry is there
+			c.Close()
+		}
+		if mac := NormMAC(lookupMAC(net.ParseIP(u.Hostname()))); mac != "" {
+			return mac
+		}
+	}
+	if sub := sonosUUIDMAC.FindStringSubmatch(m.UUID); sub != nil {
+		return NormMAC(sub[1]) + " (from its UUID)"
+	}
+	return ""
+}
+
+// printMember prints one zone group member. self is the UDN of the renderer
+// being inspected and coordinator the UUID of its group's coordinator.
+func printMember(m zgMember, indent, self, coordinator string) {
+	isSelf := self != "" && strings.Contains(self, m.UUID)
+	isCoord := coordinator != "" && m.UUID == coordinator
 	tag := ""
-	if self != "" && strings.Contains(self, m.UUID) {
+	switch {
+	case isSelf && isCoord:
+		tag = "   <-- this renderer, coordinator"
+	case isSelf:
 		tag = "   <-- this renderer"
+	case isCoord:
+		tag = "   <-- coordinating renderer"
 	}
 	fmt.Printf("%s%q  %s%s\n", indent, m.ZoneName, m.UUID, tag)
+	if mac := memberMAC(m); mac != "" {
+		fmt.Printf("%s    MAC: %s\n", indent, mac)
+	}
 	fmt.Printf("%s    location: %s\n", indent, m.Location)
 	if m.Invisible != "" {
 		fmt.Printf("%s    invisible: %s\n", indent, m.Invisible)
@@ -94,7 +130,7 @@ func printMember(m zgMember, indent string, self string) {
 	}
 	for _, s := range m.Satellites {
 		fmt.Printf("%s    satellite:\n", indent)
-		printMember(s, indent+"      ", self)
+		printMember(s, indent+"      ", self, "")
 	}
 }
 
@@ -124,7 +160,7 @@ func PrintInfo(u *Client) {
 			for _, g := range st.Groups {
 				fmt.Printf("  group %s, coordinator %s\n", g.ID, g.Coordinator)
 				for _, m := range g.Members {
-					printMember(m, "    - ", r.UDN)
+					printMember(m, "    - ", r.UDN, g.Coordinator)
 				}
 			}
 			if Verbose {
