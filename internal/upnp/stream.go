@@ -178,7 +178,11 @@ type ServeHooks struct {
 
 // Serve answers one renderer request for this stream.
 func (st *Stream) Serve(w http.ResponseWriter, r *http.Request, h ServeHooks) {
-	log.Printf("[%s] renderer requested %s %s from %s (Range: %q)", h.Name, r.Method, r.URL.Path, r.RemoteAddr, r.Header.Get("Range"))
+	if Verbose {
+		log.Printf("[%s] renderer requested %s %s from %s (Range: %q, User-Agent: %q)", h.Name, r.Method, r.URL.Path, r.RemoteAddr, r.Header.Get("Range"), r.Header.Get("User-Agent"))
+	} else {
+		log.Printf("[%s] renderer requested %s %s from %s (Range: %q)", h.Name, r.Method, r.URL.Path, r.RemoteAddr, r.Header.Get("Range"))
+	}
 	hd := w.Header()
 	ct := st.ContentType
 	if ct == "" {
