@@ -8,7 +8,7 @@ require (
 	github.com/jfreymuth/oggvorbis v1.0.5
 	github.com/mewkiz/flac v1.0.14
 	github.com/tphakala/go-aac v0.7.1
-	golang.org/x/net v0.61.0
+	golang.org/x/net v0.62.0
 )
 
 require (

@@ -14,6 +14,8 @@
 # -tags noaudio (UPnP/proxy modes only) unless LINUX_AUDIO=1.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+trap 'rc=$?; [ $rc -eq 0 ] || echo "Build failed. Current directory: $PWD" >&2' EXIT
+[ -f go.mod ] || { echo "go.mod not found in $PWD - is hack/build.sh inside a complete clone of the repository?" >&2; exit 1; }
 
 VERSION="${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}"
 LDFLAGS="-s -w -X main.version=${VERSION}"

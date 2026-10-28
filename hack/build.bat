@@ -10,7 +10,7 @@ rem
 rem The Linux builds use -tags noaudio (UPnP and proxy modes only; no cgo). macOS and
 rem Linux arm64 builds: use hack\build.sh from WSL or Git Bash.
 setlocal
-cd /d "%~dp0\.."
+cd /d "%~dp0\.." || (echo Cannot change to the repository directory "%~dp0.." & goto :fail)
 
 if /i "%~1"=="/?" goto :help
 if /i "%~1"=="-h" goto :help
@@ -22,6 +22,11 @@ if "%VERSION%"=="" set "VERSION=dev"
 set "VERSION=%VERSION: =%"
 
 echo Version is set to %VERSION%
+echo Building in %CD%
+if not exist go.mod (
+  echo go.mod not found in %CD% - is hack\build.bat inside a complete clone of the repository?
+  goto :fail
+)
 set "LDFLAGS=-s -w -X main.version=%VERSION%"
 
 rem External dependencies: fetch them, then let go mod tidy write go.mod and go.sum.
@@ -59,7 +64,7 @@ go build -trimpath -tags noaudio -ldflags "%LDFLAGS%" -o "dist\%1-%VERSION%-linu
 exit /b %errorlevel%
 
 :fail
-echo Build failed.
+echo Build failed. Current directory: %CD%
 exit /b 1
 
 :help
