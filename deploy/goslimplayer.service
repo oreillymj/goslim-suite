@@ -4,9 +4,15 @@
 #   sudo install -d /opt/goslimplayer /etc/goslimplayer
 #   sudo install goslimplayer /opt/goslimplayer/            (gunzip the release file first)
 #   sudo install -m 640 -o root -g goslim config.json /etc/goslimplayer/
+#   sudo chown goslim:root /etc/goslimplayer/config.json
+#   sudo chown goslim:root /opt/goslimplayer/goslimplayer
+#   sudo chmod +x /opt/goslimplayer/goslimplayer
 #   sudo cp goslimplayer.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now goslimplayer
 #   journalctl -u goslimplayer -f
+#   sudo runuser -u goslim -- /opt/goslimplayer/goslimplayer -u /etc/goslimplayer/config.json
+#
+# deploy/install.sh does all of this in one go (run it with sudo).
 [Unit]
 Description=GoSlimPlayer - Squeezebox player presenting UPnP renderers to Lyrion Music Server
 After=network-online.target

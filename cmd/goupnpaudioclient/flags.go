@@ -6,27 +6,30 @@ import (
 	"net"
 	"os"
 	"time"
+
+	"goslim/internal/upnp"
 )
 
 // flags holds the parsed command line.
 type flags struct {
-	list      bool
-	mac       string
-	name      string
-	host      string
-	port      int
-	mdns      bool
-	mdnsName  string
-	timeout   time.Duration
-	bind      net.IP
-	httpPort  int
-	clen      int64
-	idle      time.Duration
-	test      bool
-	volOffset int
-	volMax    int
-	info      bool
-	verbose   bool
+	list        bool
+	mac         string
+	name        string
+	host        string
+	port        int
+	mdns        bool
+	mdnsName    string
+	timeout     time.Duration
+	bind        net.IP
+	httpPort    int
+	clen        int64
+	idle        time.Duration
+	test        bool
+	volOffset   int
+	volMax      int
+	info        bool
+	verbose     bool
+	probeWindow time.Duration
 
 	showVersion bool
 	logFile     string
@@ -64,6 +67,7 @@ Options:
 	fs.IntVar(&f.volOffset, "voloffset", 0, "add this (positive or negative) to the volume LMS asks for, in renderer percent")
 	fs.IntVar(&f.volMax, "volmax", 100, "never set the renderer louder than this percent")
 	fs.BoolVar(&f.info, "info", false, "with -m: print the renderer's zone group / stereo pair and per-channel volume details, then exit")
+	fs.DurationVar(&f.probeWindow, "reconnectreplay", upnp.ProbeWindow, "a renderer that opens a stream, closes it and opens it again (GStreamer-based ones do) gets the stream from\nthe start again if it comes back within this time of its first request, however much it had read. 0 turns this off")
 	fs.BoolVar(&f.verbose, "v", false, "verbose output")
 	fs.BoolVar(&f.showVersion, "version", false, "print the version and exit")
 	fs.StringVar(&f.logFile, "logfile", "", "also append log output to this file")

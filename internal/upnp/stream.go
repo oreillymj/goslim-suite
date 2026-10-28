@@ -20,6 +20,12 @@ const (
 var (
 	ReconnectGrace = 5 * time.Second
 	NeverFetched   = 10 * time.Second
+
+	// ProbeWindow: a renderer that opens a stream, closes it and opens it again to play (GStreamer's
+	// souphttpsrc does) is sent the stream from the start again when the reconnect comes within this long
+	// of its first request, provided we still hold the start of the stream. It does not depend on how much
+	// the first connection read. Set by -reconnectreplay; 0 turns it off, leaving only the replayLimit rule.
+	ProbeWindow = 3 * time.Second
 )
 
 // WAVFmt describes the PCM in a stream.
@@ -64,6 +70,8 @@ type Stream struct {
 
 	metaMu sync.Mutex // ICY metadata marks, see icy.go
 	marks  []metaMark
+
+	firstConn time.Time // when the first GET arrived
 
 	closed, aborted, accounted, everConnected bool
 	conns, connGen                            int
@@ -178,7 +186,11 @@ type ServeHooks struct {
 
 // Serve answers one renderer request for this stream.
 func (st *Stream) Serve(w http.ResponseWriter, r *http.Request, h ServeHooks) {
-	log.Printf("[%s] renderer requested %s %s from %s (Range: %q)", h.Name, r.Method, r.URL.Path, r.RemoteAddr, r.Header.Get("Range"))
+	if Verbose {
+		log.Printf("[%s] renderer requested %s %s from %s (Range: %q, User-Agent: %q)", h.Name, r.Method, r.URL.Path, r.RemoteAddr, r.Header.Get("Range"), r.Header.Get("User-Agent"))
+	} else {
+		log.Printf("[%s] renderer requested %s %s from %s (Range: %q)", h.Name, r.Method, r.URL.Path, r.RemoteAddr, r.Header.Get("Range"))
+	}
 	hd := w.Header()
 	ct := st.ContentType
 	if ct == "" {
@@ -208,9 +220,12 @@ func (st *Stream) Serve(w http.ResponseWriter, r *http.Request, h ServeHooks) {
 	st.mu.Lock()
 	st.conns++
 	st.connGen++
+	if !st.everConnected {
+		st.firstConn = time.Now()
+	}
 	st.everConnected = true
 	pos, needHdr := int64(0), false
-	if st.hw > replayLimit {
+	if st.hw > replayLimit && !(ProbeWindow > 0 && st.base == 0 && time.Since(st.firstConn) < ProbeWindow) {
 		pos, needHdr = st.hw, true
 	}
 	st.mu.Unlock()

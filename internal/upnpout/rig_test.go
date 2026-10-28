@@ -64,7 +64,8 @@ type rigOptions struct {
 	volume      bool  // the fake LMS sends a volume change after HELO
 	noFetch     bool  // the renderer accepts the stream URL but never requests it (a firewall in the way)
 	netFail     func(string)
-	icy         bool // ICY metadata on, and the fake renderer asks for it
+	replayGain  uint32 // 16.16 fixed point gain LMS puts in the strm command (0 = none)
+	icy         bool   // ICY metadata on, and the fake renderer asks for it
 }
 
 // rig is a fake LMS, a fake UPnP renderer and the player under test.
@@ -174,6 +175,7 @@ func newRig(t *testing.T, o rigOptions) *rig {
 				return
 			}
 			hdr := append([]byte{'s', '1', o.tracks[i].format, '?', '?', '?', '?', 0, 0, 0, '0', 0, 0, 0}, 0, 0, 0, 0)
+			binary.BigEndian.PutUint32(hdr[14:18], o.replayGain)
 			hdr = binary.BigEndian.AppendUint16(hdr, uint16(httpPort))
 			hdr = append(hdr, 0, 0, 0, 0)
 			c.Write(frame("strm", append(hdr, []byte("GET /"+itoa(i)+" HTTP/1.0\r\n\r\n")...)))
@@ -251,7 +253,7 @@ func newRig(t *testing.T, o rigOptions) *rig {
 	g.c = player.New(player.Options{
 		Name: "T", MAC: net.HardwareAddr{2, 0, 0, 0, 0, 1}, OutRate: 48000,
 		Decoder: &decode.Decoder{OutRate: 48000}, Finder: finder,
-		NoResample: o.noResample, Passthrough: o.passthrough, Web: player.WebConfig{Port: o.webPort},
+		NoResample: o.noResample, Passthrough: o.passthrough, Web: player.WebConfig{Port: o.webPort}, ReplayGain: true,
 	})
 	g.out = New(g.c, r, Options{Name: "T", Idle: 30 * time.Second, VolMax: 100, AutoResume: o.autoResume, RotateBytes: o.rotate, OnNetFail: o.netFail, ICY: o.icy})
 	g.c.SetOutput(g.out)

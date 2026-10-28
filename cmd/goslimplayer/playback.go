@@ -23,6 +23,7 @@ import (
 // (or immediately for the one-shot modes).
 func run(ctx context.Context, f *flags) error {
 	upnp.Verbose = f.verbose
+	upnp.ProbeWindow = f.probeWindow
 	switch {
 	case f.info:
 		return showInfo(f)
@@ -265,6 +266,13 @@ func startPlayer(ctx context.Context, cancel context.CancelCauseFunc, f *flags, 
 				r = cand
 				break
 			}
+		}
+	}
+	if r.IP != nil { // addresses come from DHCP: keep the file's informational "ip" current
+		if old, changed, err := config.UpdateIP(f.configFile, pc.MAC, r.IP.String()); err != nil {
+			log.Printf("[%s] cannot update the ip in %s: %v", label, f.configFile, err)
+		} else if changed {
+			log.Printf("[%s] the renderer's address has changed from %s to %s; updated %s", label, old, r.IP, f.configFile)
 		}
 	}
 	name := pc.Name
