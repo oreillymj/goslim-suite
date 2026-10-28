@@ -368,9 +368,14 @@ func (c *Client) startStream(d []byte) {
 		return
 	}
 	gain := 1.0
-	if g := binary.BigEndian.Uint32(d[14:18]); g != 0 && c.opts.ReplayGain {
+	switch g := binary.BigEndian.Uint32(d[14:18]); {
+	case g != 0 && c.opts.ReplayGain:
 		gain = float64(g) / 65536
-		log.Printf("[%s] replay gain %+.2f dB", c.name, 20*math.Log10(gain))
+		log.Printf("[%s] replay gain %+.3f dB (LMS sent 0x%08x, multiplier %.4f)", c.name, 20*math.Log10(gain), g, gain)
+	case g != 0:
+		log.Printf("[%s] LMS sent a replay gain of %+.3f dB, ignored because of -replaygain=false", c.name, 20*math.Log10(float64(g)/65536))
+	case c.opts.Verbose:
+		log.Printf("[%s] LMS sent no replay gain for this track (check Settings > Player > Audio > Replay Gain in LMS: it must not be set to ignore it)", c.name)
 	}
 	t := &track{buf: newPCMBuf(), conn: conn, autostart: autostart, threshold: int(d[7]) * 1024, gain: gain, raw: c.opts.Passthrough, format: format}
 	copy(t.pcmFmt[:], d[3:7])
@@ -480,7 +485,7 @@ func (c *Client) logTrack(i decode.Info, gain float64) {
 	}
 	extra := ""
 	if gain != 1 {
-		extra = fmt.Sprintf(", ReplayGain %+.2f dB", 20*math.Log10(gain))
+		extra = fmt.Sprintf(", ReplayGain %+.3f dB", 20*math.Log10(gain))
 	}
 	log.Printf("[%s] track: %s -> %s%s", c.name, i, what, extra)
 }

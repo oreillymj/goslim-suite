@@ -363,3 +363,35 @@ func TestICYMetadata(t *testing.T) {
 		t.Errorf("metadata %q, want %q", found, want)
 	}
 }
+
+// The gain LMS puts in the strm command is logged and applied to the audio.
+func TestReplayGainAppliedAndLogged(t *testing.T) {
+	var logs syncBuf
+	log.SetOutput(&logs)
+	defer log.SetOutput(io.Discard)
+
+	peak := func(g *rig) int {
+		waitFor(t, "audio", 10*time.Second, func() bool { return len(g.body(0)) > 44+48000 })
+		body := g.body(0)
+		max := 0
+		for i := 44; i+1 < len(body) && i < 44+48000; i += 2 {
+			v := int(int16(uint16(body[i]) | uint16(body[i+1])<<8))
+			if v < 0 {
+				v = -v
+			}
+			if v > max {
+				max = v
+			}
+		}
+		return max
+	}
+	trk := []testTrack{{'p', testWAV(48000, 1.0)}}
+	full := peak(newRig(t, rigOptions{tracks: trk}))
+	half := peak(newRig(t, rigOptions{tracks: trk, replayGain: 0x8000})) // multiplier 0.5 = -6.021 dB
+	if full < 9000 || half < 4000 || half > 5200 {
+		t.Errorf("peaks: without gain %d, with a gain of 0.5 %d", full, half)
+	}
+	if !strings.Contains(logs.String(), "replay gain -6.021 dB") {
+		t.Errorf("the replay gain was not logged:\n%s", logs.String())
+	}
+}

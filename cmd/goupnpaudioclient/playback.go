@@ -22,6 +22,7 @@ import (
 // (or immediately for the one-shot modes).
 func run(ctx context.Context, f *flags) error {
 	upnp.Verbose = f.verbose
+	upnp.ProbeWindow = f.probeWindow
 	addr := net.JoinHostPort(f.host, strconv.Itoa(f.port))
 	discover := func() (string, error) { return findGoSlim(ctx, f) }
 	if !f.mdns {

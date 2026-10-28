@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"goslim/internal/config"
+	"goslim/internal/upnp"
 )
 
 // flags holds the parsed command line.
@@ -48,6 +49,7 @@ type flags struct {
 	icy           bool
 	exitOnNetFail bool
 	verbose       bool
+	probeWindow   time.Duration
 
 	// process
 	showVersion bool
@@ -107,6 +109,7 @@ Options:
 	fs.BoolVar(&f.icy, "icy", false, "default: send track title and cover art to renderers that ask for ICY in-band metadata (Icy-Metadata: 1).\nOff by default: a renderer that asks but does not apply it to the stream format may play the metadata as noise")
 	fs.BoolVar(&f.autoResume, "autoresume", false, "default: when a renderer stops pulling the stream unexpectedly (Wi-Fi drop, renderer reset), start a new stream\ninstead of pausing LMS; pressing stop in LMS still stops")
 	fs.BoolVar(&f.exitOnNetFail, "exitonnetfail", false, "default: log it and carry on. true exits with an error when a renderer never fetches its audio stream (firewall\nblocking the stream port, wrong network after a reconfiguration), so a service manager such as systemd restarts the program until it works")
+	fs.DurationVar(&f.probeWindow, "reconnectreplay", upnp.ProbeWindow, "a renderer that opens a stream, closes it and opens it again (GStreamer-based ones do) gets the stream from\nthe start again if it comes back within this time of its first request, however much it had read. 0 turns this off")
 	fs.BoolVar(&f.verbose, "v", false, "verbose output: log what each track is, LMS volume changes and renderer statistics")
 
 	// process

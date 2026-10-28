@@ -90,3 +90,61 @@ func TestPacer(t *testing.T) {
 		t.Errorf("after Drain the bucket is empty, waited only %v", d)
 	}
 }
+
+// A short track can be read in full by the renderer's first (probe) connection; when it
+// opens the URL again straight away it must get the whole track, not just the header.
+func TestStreamReplayShortTrackServedInFull(t *testing.T) {
+	hdr := WAVHeader(48000)
+	st := NewStream(1, WAVFmt{Rate: 48000, Channels: 2, Bits: 16}, hdr)
+	pcm := make([]byte, 2<<20) // more than replayLimit
+	for i := range pcm {
+		pcm[i] = byte(i * 7)
+	}
+	st.AppendData(pcm)
+	st.Finish(false)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		st.Serve(w, r, ServeHooks{Name: "t"})
+	}))
+	defer srv.Close()
+	want := append(append([]byte(nil), hdr...), pcm...)
+	for i := 0; i < 2; i++ {
+		resp, err := http.Get(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("request %d: %d bytes, err %v (want %d)", i+1, len(got), err, len(want))
+		}
+	}
+}
+
+// With -reconnectreplay=0 the old rule applies: after more than replayLimit has been served a
+// reconnect continues from where the stream got to.
+func TestStreamReplayWindowOff(t *testing.T) {
+	defer func(w time.Duration) { ProbeWindow = w }(ProbeWindow)
+	ProbeWindow = 0
+	hdr := WAVHeader(48000)
+	st := NewStream(1, WAVFmt{Rate: 48000, Channels: 2, Bits: 16}, hdr)
+	st.AppendData(make([]byte, 2<<20))
+	st.Finish(false)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		st.Serve(w, r, ServeHooks{Name: "t"})
+	}))
+	defer srv.Close()
+	var sizes []int
+	for i := 0; i < 2; i++ {
+		resp, err := http.Get(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		sizes = append(sizes, len(b))
+	}
+	if sizes[0] != len(hdr)+2<<20 || sizes[1] != len(hdr) {
+		t.Errorf("sizes %v", sizes)
+	}
+}
