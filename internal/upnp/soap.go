@@ -10,13 +10,30 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 )
 
 type Client struct {
 	HC    *http.Client
-	R     *Renderer
-	Label string // player name, for log lines
+	R     *Renderer // read it with Renderer(): SetRenderer can replace it when the device gets a new address
+	Label string    // player name, for log lines
+
+	mu sync.RWMutex
+}
+
+// Renderer is the renderer this client talks to.
+func (u *Client) Renderer() *Renderer {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.R
+}
+
+// SetRenderer points the client at r, a fresh description of the same device (after a DHCP change).
+func (u *Client) SetRenderer(r *Renderer) {
+	u.mu.Lock()
+	u.R = r
+	u.mu.Unlock()
 }
 
 func (u *Client) soap(svc *Service, action string, args ...[2]string) error {
@@ -56,23 +73,23 @@ func (u *Client) soap(svc *Service, action string, args ...[2]string) error {
 }
 
 func (u *Client) SetURI(uri, meta string) error {
-	return u.soap(u.R.AVTransport, "SetAVTransportURI",
+	return u.soap(u.Renderer().AVTransport, "SetAVTransportURI",
 		[2]string{"InstanceID", "0"}, [2]string{"CurrentURI", uri}, [2]string{"CurrentURIMetaData", meta})
 }
 func (u *Client) Play() error {
-	return u.soap(u.R.AVTransport, "Play", [2]string{"InstanceID", "0"}, [2]string{"Speed", "1"})
+	return u.soap(u.Renderer().AVTransport, "Play", [2]string{"InstanceID", "0"}, [2]string{"Speed", "1"})
 }
 func (u *Client) Pause() error {
-	return u.soap(u.R.AVTransport, "Pause", [2]string{"InstanceID", "0"})
+	return u.soap(u.Renderer().AVTransport, "Pause", [2]string{"InstanceID", "0"})
 }
 func (u *Client) Stop() error {
-	return u.soap(u.R.AVTransport, "Stop", [2]string{"InstanceID", "0"})
+	return u.soap(u.Renderer().AVTransport, "Stop", [2]string{"InstanceID", "0"})
 }
 func (u *Client) SetVolume(v int) error {
-	if u.R.RenderingControl == nil {
+	if u.Renderer().RenderingControl == nil {
 		return nil
 	}
-	return u.soap(u.R.RenderingControl, "SetVolume",
+	return u.soap(u.Renderer().RenderingControl, "SetVolume",
 		[2]string{"InstanceID", "0"}, [2]string{"Channel", "Master"}, [2]string{"DesiredVolume", strconv.Itoa(v)})
 }
 
@@ -80,7 +97,7 @@ var transportRe = regexp.MustCompile(`<CurrentTransportState>([^<]*)</CurrentTra
 
 // transportState returns PLAYING, PAUSED_PLAYBACK, STOPPED, TRANSITIONING, ...
 func (u *Client) TransportState() (string, error) {
-	body, err := u.call(u.R.AVTransport, "GetTransportInfo", [2]string{"InstanceID", "0"})
+	body, err := u.call(u.Renderer().AVTransport, "GetTransportInfo", [2]string{"InstanceID", "0"})
 	if err != nil {
 		return "", err
 	}

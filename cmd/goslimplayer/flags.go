@@ -48,13 +48,15 @@ type flags struct {
 	autoResume    bool
 	icy           bool
 	exitOnNetFail bool
+	stallTimeout  time.Duration
 	verbose       bool
 	probeWindow   time.Duration
 
 	// process
-	showVersion bool
-	logFile     string
-	logTime     bool
+	showVersion             bool
+	showAbout, showLicenses bool
+	logFile                 string
+	logTime                 bool
 }
 
 func parseFlags(args []string) (*flags, error) {
@@ -108,12 +110,15 @@ Options:
 	fs.BoolVar(&f.resampleAudio, "resampleaudio", true, "default: resample everything to -rate. false sends each track's decoded PCM at its own sample rate\n(a change of rate starts a new stream with a short gap)")
 	fs.BoolVar(&f.icy, "icy", false, "default: send track title and cover art to renderers that ask for ICY in-band metadata (Icy-Metadata: 1).\nOff by default: a renderer that asks but does not apply it to the stream format may play the metadata as noise")
 	fs.BoolVar(&f.autoResume, "autoresume", false, "default: when a renderer stops pulling the stream unexpectedly (Wi-Fi drop, renderer reset), start a new stream\ninstead of pausing LMS; pressing stop in LMS still stops")
+	fs.DurationVar(&f.stallTimeout, "stalltimeout", 10*time.Minute, "if a renderer drops its stream and LMS does not pause, resume or stop the player within this time, LMS and the speakers\nare out of step and nothing would restart them: exit with an error so a service manager such as systemd restarts the program. 0 turns it off")
 	fs.BoolVar(&f.exitOnNetFail, "exitonnetfail", false, "default: log it and carry on. true exits with an error when a renderer never fetches its audio stream (firewall\nblocking the stream port, wrong network after a reconfiguration), so a service manager such as systemd restarts the program until it works")
 	fs.DurationVar(&f.probeWindow, "reconnectreplay", upnp.ProbeWindow, "a renderer that opens a stream, closes it and opens it again (GStreamer-based ones do) gets the stream from\nthe start again if it comes back within this time of its first request, however much it had read. 0 turns this off")
 	fs.BoolVar(&f.verbose, "v", false, "verbose output: log what each track is, LMS volume changes and renderer statistics")
 
 	// process
 	fs.BoolVar(&f.showVersion, "version", false, "print the version and exit")
+	fs.BoolVar(&f.showAbout, "about", false, "list the open source projects built into this program and their licenses, then exit")
+	fs.BoolVar(&f.showLicenses, "licenses", false, "like -about, followed by the full license texts")
 	fs.StringVar(&f.logFile, "logfile", "", "also append log output to this file")
 	fs.BoolVar(&f.logTime, "logtime", true, "prefix log lines with a timestamp (use -logtime=false under systemd, which adds its own)")
 

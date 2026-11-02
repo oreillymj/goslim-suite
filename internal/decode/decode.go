@@ -137,7 +137,7 @@ func (d *Decoder) DecodeInfo(format byte, r io.Reader, pcmHint [4]byte, sink Sin
 }
 
 func decodeMP3(r io.Reader, sink Sink) error {
-	d, err := mp3.NewDecoder(r)
+	d, err := mp3.NewDecoder(mp3Sync(r))
 	if err != nil {
 		return err
 	}

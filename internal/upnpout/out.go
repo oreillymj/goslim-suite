@@ -41,12 +41,17 @@ type Options struct {
 	Clen              int64 // Content-Length to advertise; 0 = chunked
 	Idle              time.Duration
 	VolOffset, VolMax int
-	BufferSecs        float64             // >0: pace the stream so the renderer holds at most this much ahead of playback
-	AutoResume        bool                // start a new stream if the renderer stops pulling one
-	ICY               bool                // answer Icy-Metadata requests with track title and cover art in the stream
-	RotateBytes       int64               // replace the stream after this many bytes (0 = 3 GiB)
-	PortScan          int                 // ports above the original to try if the HTTP port must be re-bound (0 = 50)
-	OnNetFail         func(reason string) // called when the renderer cannot reach our stream at all (firewall, wrong network); nil = just log
+	BufferSecs        float64 // >0: pace the stream so the renderer holds at most this much ahead of playback
+	AutoResume        bool    // start a new stream if the renderer stops pulling one
+	ICY               bool    // answer Icy-Metadata requests with track title and cover art in the stream
+	RotateBytes       int64   // replace the stream after this many bytes (0 = 3 GiB)
+	PortScan          int     // ports above the original to try if the HTTP port must be re-bound (0 = 50)
+	// Rediscover finds the renderer again (by MAC) and returns its current description, nil if it does not
+	// answer. It is used when the renderer stops answering, because a DHCP lease change may have moved it.
+	Rediscover func() *upnp.Renderer
+	// OnMoved is called after the output has switched to a renderer's new address (to update config.json).
+	OnMoved   func(old, new net.IP)
+	OnNetFail func(reason string) // called when the renderer cannot reach our stream at all (firewall, wrong network); nil = just log
 }
 
 // trackMark remembers where in the byte stream a track begins, so its
@@ -73,7 +78,11 @@ type Out struct {
 	rotateBytes       int64
 	portScan          int
 	onNetFail         func(reason string)
-	raw               bool // passthrough mode
+	rediscover        func() *upnp.Renderer
+	onMoved           func(old, new net.IP)
+	streamLostAt      atomic.Int64 // unix nanos of the last unexpected end of a stream
+	failSince         atomic.Int64 // unix nanos since which the renderer has not answered, 0 = it answers
+	raw               bool         // passthrough mode
 
 	cmds chan func() // serialises SOAP calls so the pump never waits on the renderer
 	kick chan struct{}
@@ -133,7 +142,7 @@ func New(c *player.Client, r *upnp.Renderer, o Options) *Out {
 		c: c, name: o.Name, up: upnp.NewClient(r, o.Name),
 		clen: o.Clen, idle: o.Idle, volOffset: o.VolOffset, volMax: o.VolMax,
 		bufferSecs: o.BufferSecs, window: feedWindow, autoResume: o.AutoResume, icy: o.ICY,
-		rotateBytes: o.RotateBytes, portScan: o.PortScan, onNetFail: o.OnNetFail, raw: c.Options().Passthrough,
+		rotateBytes: o.RotateBytes, portScan: o.PortScan, onNetFail: o.OnNetFail, rediscover: o.Rediscover, onMoved: o.OnMoved, raw: c.Options().Passthrough,
 		cmds: make(chan func(), 64), kick: make(chan struct{}, 1),
 	}
 	if o.BufferSecs > 0 {
@@ -157,6 +166,7 @@ func (o *Out) Run() {
 		go o.watchdog()
 	}
 	go o.poll()
+	go o.locate()
 }
 
 // ---------------------------------------------------------------- plumbing
@@ -209,7 +219,7 @@ func (o *Out) sleep(d time.Duration) bool {
 // baseURL is where the renderer can reach us. The local address is looked up
 // each time because a DHCP renewal or a network recovery can change it.
 func (o *Out) baseURL() string {
-	ip, err := upnp.LocalIPFor(o.up.R.IP)
+	ip, err := upnp.LocalIPFor(o.up.Renderer().IP)
 	o.mu.Lock()
 	if err == nil {
 		o.lastIP = ip
@@ -474,13 +484,23 @@ func (o *Out) endStream(st *upnp.Stream, reason string) {
 	complete := st.Finished() && st.Drained() // finished on purpose and fully served: it simply ended
 	o.mu.Lock()
 	was := o.cur == st
-	if was && !complete {
+	// A renderer that LMS paused drops its connection (Sonos does) and the stream times out; that is not a
+	// lost stream. Keep the pause: the next audio after LMS resumes starts a new stream.
+	lmsPaused := was && !complete && o.paused && !o.extPaused
+	if was && !complete && !lmsPaused {
 		o.cur, o.paused, o.extPaused = nil, false, false
+	} else if lmsPaused {
+		o.cur = nil
 	}
 	o.mu.Unlock()
 	o.consumed.Add(st.Finish(true))
+	if lmsPaused {
+		log.Printf("[%s] stream %d closed while paused (%s); a new stream starts when LMS resumes", o.name, st.ID, reason)
+		return
+	}
 	if was && !complete {
 		o.recordRestart(st, reason)
+		o.streamLostAt.Store(time.Now().UnixNano())
 		o.gone.Store(true)
 		o.kickNow()
 	}
@@ -493,7 +513,7 @@ func (o *Out) handleGone() {
 		log.Printf("[%s] the renderer stopped pulling the stream; starting a new one when it answers (autoresume)", o.name)
 		return
 	}
-	if o.c.PauseFromOutput() {
+	if o.c.StreamLost() {
 		log.Printf("[%s] renderer stopped; pausing", o.name)
 	}
 }
@@ -506,6 +526,11 @@ func (o *Out) waitReachable(gen int64) bool {
 	logged := false
 	for {
 		_, err := o.up.TransportState()
+		if err != nil {
+			o.failSince.CompareAndSwap(0, time.Now().UnixNano())
+		} else {
+			o.failSince.Store(0)
+		}
 		if err == nil {
 			o.recover.Store(false)
 			o.noteRecovered()

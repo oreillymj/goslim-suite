@@ -27,9 +27,10 @@ type flags struct {
 	stereoTest string
 	verbose    bool
 
-	showVersion bool
-	logFile     string
-	logTime     bool
+	showVersion             bool
+	showAbout, showLicenses bool
+	logFile                 string
+	logTime                 bool
 }
 
 func parseFlags(args []string) (*flags, error) {
@@ -65,6 +66,8 @@ Options:
 	fs.StringVar(&f.stereoTest, "stereotest", "", "proxy mode test: stream this WAV file (looked up next to the executable) to each\nconnecting client instead of using LMS audio; exits if the file is missing")
 	fs.BoolVar(&f.verbose, "v", false, "verbose output: log what each track is (format, bitrate, sample rate)")
 	fs.BoolVar(&f.showVersion, "version", false, "print the version and exit")
+	fs.BoolVar(&f.showAbout, "about", false, "list the open source projects built into this program and their licenses, then exit")
+	fs.BoolVar(&f.showLicenses, "licenses", false, "like -about, followed by the full license texts")
 	fs.StringVar(&f.logFile, "logfile", "", "also append log output to this file")
 	fs.BoolVar(&f.logTime, "logtime", true, "prefix log lines with a timestamp (use -logtime=false under systemd, which adds its own)")
 	if err := fs.Parse(args); err != nil {

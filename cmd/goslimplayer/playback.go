@@ -319,6 +319,13 @@ func startPlayer(ctx context.Context, cancel context.CancelCauseFunc, f *flags, 
 		log.Printf("[%s] %v", name, err)
 		return upnpPlayer{}, false
 	}
+	if f.stallTimeout > 0 {
+		opts.StallTimeout = f.stallTimeout
+		opts.OnStall = func(reason string) {
+			log.Printf("[%s] stalled: %s; exiting so the service manager can restart the program (-stalltimeout)", name, reason)
+			cancel(fmt.Errorf("[%s] stalled: %s", name, reason))
+		}
+	}
 	opts.Passthrough = !decodeAudio
 	opts.NoResample = !resampleAudio || !decodeAudio
 	c := player.New(opts)
@@ -330,7 +337,21 @@ func startPlayer(ctx context.Context, cancel context.CancelCauseFunc, f *flags, 
 		}
 	}
 	out := upnpout.New(c, r, upnpout.Options{
-		OnNetFail: onNetFail, Name: name, Clen: f.clen, Idle: f.idle, VolOffset: vo, VolMax: vm, BufferSecs: buf, AutoResume: autoResume, ICY: icy,
+		OnNetFail: onNetFail,
+		Rediscover: func() *upnp.Renderer {
+			for _, cand := range upnp.DiscoverRenderers(f.bind, f.timeout) {
+				if cand.MAC == pc.MAC {
+					return cand
+				}
+			}
+			return nil
+		},
+		OnMoved: func(old, cur net.IP) {
+			if _, _, err := config.UpdateIP(f.configFile, pc.MAC, cur.String()); err != nil {
+				log.Printf("[%s] cannot update the ip in %s: %v", name, f.configFile, err)
+			}
+		},
+		Name: name, Clen: f.clen, Idle: f.idle, VolOffset: vo, VolMax: vm, BufferSecs: buf, AutoResume: autoResume, ICY: icy,
 	})
 	c.SetOutput(out)
 	out.Serve(ln)
