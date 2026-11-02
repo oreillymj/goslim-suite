@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 
+	"goslim/internal/about"
 	"goslim/internal/app"
 )
 
@@ -23,6 +24,10 @@ func main() {
 		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
+	}
+	if f.showAbout || f.showLicenses {
+		about.Write(os.Stdout, "goupnpaudioclient", version, f.showLicenses)
+		return
 	}
 	if f.showVersion {
 		fmt.Println(app.VersionLine("goupnpaudioclient", version))

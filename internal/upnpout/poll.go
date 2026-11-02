@@ -63,8 +63,10 @@ func (o *Out) poll() {
 			if upnp.Verbose {
 				log.Printf("[%s] GetTransportInfo: %v", o.name, err)
 			}
+			o.failSince.CompareAndSwap(0, time.Now().UnixNano())
 			continue
 		}
+		o.failSince.Store(0)
 		o.mu.Lock()
 		o.lastState = ts
 		o.mu.Unlock()

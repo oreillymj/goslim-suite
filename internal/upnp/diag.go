@@ -135,7 +135,7 @@ func printMember(m zgMember, indent, self, coordinator string) {
 }
 
 func PrintInfo(u *Client) {
-	r := u.R
+	r := u.Renderer()
 	fmt.Printf("Renderer: %s\nMAC: %s   IP: %s\nUDN: %s\n\n", r.Name, r.MAC, r.IP, r.UDN)
 
 	fmt.Println("Zone groups (as this speaker reports them):")

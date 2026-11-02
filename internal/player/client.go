@@ -43,6 +43,13 @@ type Options struct {
 	Passthrough bool // don't decode: hand LMS's original stream to the output (experimental)
 	NoResample  bool // keep each track's own sample rate instead of resampling to OutRate
 	Verbose     bool // log what each track is
+
+	// StallTimeout and OnStall: when the output loses its stream (the renderer stopped pulling it) and LMS
+	// does not react (no pause, play, stop or new track) within StallTimeout, OnStall is called with the
+	// reason. LMS then still shows the track as playing while nothing reaches the speakers and nothing
+	// would ever restart it. 0 turns the check off.
+	StallTimeout time.Duration
+	OnStall      func(reason string)
 }
 
 type track struct {
@@ -80,6 +87,7 @@ type Client struct {
 	queue   []*track
 	playing bool
 	volume  float64
+	lostAt  time.Time // when the output lost its stream and LMS has not reacted since; zero otherwise
 
 	bytesRecv atomic.Uint64
 }
@@ -151,10 +159,56 @@ func (c *Client) PauseFromOutput() bool {
 	return was
 }
 
+// StreamLost is PauseFromOutput for a stream that the renderer dropped. LMS is told, but an
+// unsolicited pause does not always change what LMS thinks the player is doing, so the time is
+// recorded: any command from LMS clears it, and a Client with a StallTimeout calls OnStall if none
+// arrives in time.
+func (c *Client) StreamLost() bool {
+	was := c.PauseFromOutput()
+	if was {
+		c.mu.Lock()
+		c.lostAt = time.Now()
+		c.mu.Unlock()
+	}
+	return was
+}
+
+// stalled reports whether a lost stream has gone unanswered by LMS for StallTimeout.
+func (c *Client) stalled(now time.Time) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.opts.StallTimeout <= 0 || c.lostAt.IsZero() || now.Sub(c.lostAt) < c.opts.StallTimeout {
+		return "", false
+	}
+	return fmt.Sprintf("the renderer dropped its stream %s ago and LMS has not paused, resumed or stopped the player since",
+		now.Sub(c.lostAt).Round(time.Second)), true
+}
+
+// watchStall runs for the life of the Client.
+func (c *Client) watchStall() {
+	if c.opts.StallTimeout <= 0 || c.opts.OnStall == nil {
+		return
+	}
+	tk := time.NewTicker(time.Second)
+	defer tk.Stop()
+	for {
+		select {
+		case <-c.quit:
+			return
+		case <-tk.C:
+			if why, ok := c.stalled(time.Now()); ok {
+				c.opts.OnStall(why)
+				return
+			}
+		}
+	}
+}
+
 // ResumeFromOutput resumes the player because the output resumed on its own
 // side, and tells LMS.
 func (c *Client) ResumeFromOutput() {
 	c.mu.Lock()
+	c.lostAt = time.Time{}
 	c.playing = len(c.queue) > 0
 	c.mu.Unlock()
 	c.Notify("STMr")
@@ -313,6 +367,11 @@ func (c *Client) handle(op string, d []byte) {
 func (c *Client) handleStrm(d []byte) {
 	if len(d) < 24 {
 		return
+	}
+	if d[0] != 't' { // a status request is not a reaction
+		c.mu.Lock()
+		c.lostAt = time.Time{}
+		c.mu.Unlock()
 	}
 	switch d[0] {
 	case 's':
@@ -645,6 +704,7 @@ func (c *Client) run(addr string) error {
 // Loop keeps the player connected to LMS until Close is called. The server
 // address comes from the lookup shared by all players in the process.
 func (c *Client) Loop() {
+	go c.watchStall()
 	short := 0 // consecutive connections that LMS closed within seconds
 	for {
 		select {

@@ -31,9 +31,10 @@ type flags struct {
 	verbose     bool
 	probeWindow time.Duration
 
-	showVersion bool
-	logFile     string
-	logTime     bool
+	showVersion             bool
+	showAbout, showLicenses bool
+	logFile                 string
+	logTime                 bool
 }
 
 func parseFlags(args []string) (*flags, error) {
@@ -70,6 +71,8 @@ Options:
 	fs.DurationVar(&f.probeWindow, "reconnectreplay", upnp.ProbeWindow, "a renderer that opens a stream, closes it and opens it again (GStreamer-based ones do) gets the stream from\nthe start again if it comes back within this time of its first request, however much it had read. 0 turns this off")
 	fs.BoolVar(&f.verbose, "v", false, "verbose output")
 	fs.BoolVar(&f.showVersion, "version", false, "print the version and exit")
+	fs.BoolVar(&f.showAbout, "about", false, "list the open source projects built into this program and their licenses, then exit")
+	fs.BoolVar(&f.showLicenses, "licenses", false, "like -about, followed by the full license texts")
 	fs.StringVar(&f.logFile, "logfile", "", "also append log output to this file")
 	fs.BoolVar(&f.logTime, "logtime", true, "prefix log lines with a timestamp (use -logtime=false under systemd, which adds its own)")
 	if err := fs.Parse(args); err != nil {
