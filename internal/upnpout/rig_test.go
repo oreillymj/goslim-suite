@@ -2,6 +2,7 @@ package upnpout
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"html"
@@ -21,6 +22,9 @@ import (
 	"goslim/internal/player"
 	"goslim/internal/upnp"
 )
+
+// Set once, before any rig runs: the programs read it from several goroutines.
+func init() { upnp.ReconnectGrace = 400 * time.Millisecond }
 
 func testWAV(rate int, secs float64) []byte {
 	n := int(float64(rate) * secs)
@@ -53,19 +57,22 @@ type testTrack struct {
 }
 
 type rigOptions struct {
-	tracks      []testTrack
-	noResample  bool
-	passthrough bool
-	autoResume  bool
-	rotate      int64
-	dropAfter   int64 // the renderer hangs up on its first stream after this many bytes
-	idleOnly    bool  // connect the player but send nothing
-	webPort     int   // LMS web port for volume/track lookups
-	volume      bool  // the fake LMS sends a volume change after HELO
-	noFetch     bool  // the renderer accepts the stream URL but never requests it (a firewall in the way)
-	netFail     func(string)
-	replayGain  uint32 // 16.16 fixed point gain LMS puts in the strm command (0 = none)
-	icy         bool   // ICY metadata on, and the fake renderer asks for it
+	tracks       []testTrack
+	noResample   bool
+	passthrough  bool
+	autoResume   bool
+	rotate       int64
+	dropAfter    int64 // the renderer hangs up on its first stream after this many bytes
+	idleOnly     bool  // connect the player but send nothing
+	webPort      int   // LMS web port for volume/track lookups
+	volume       bool  // the fake LMS sends a volume change after HELO
+	noFetch      bool  // the renderer accepts the stream URL but never requests it (a firewall in the way)
+	netFail      func(string)
+	replayGain   uint32 // 16.16 fixed point gain LMS puts in the strm command (0 = none)
+	icy          bool   // ICY metadata on, and the fake renderer asks for it
+	closeOnPause bool   // the fake renderer drops its stream connection when it is paused (Sonos does)
+	resumeMax    int    // Options.AutoResumeMax
+	resumeLimit  func(string)
 }
 
 // rig is a fake LMS, a fake UPnP renderer and the player under test.
@@ -87,6 +94,8 @@ type rig struct {
 	endTimes map[int]time.Time
 	active   int
 	sentNext int
+	lms      net.Conn // the fake LMS side of the Slimproto connection
+	cancels  []func() // ends the fake renderer's open stream fetches
 }
 
 func (g *rig) has(event string) bool {
@@ -124,7 +133,6 @@ func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool)
 
 func newRig(t *testing.T, o rigOptions) *rig {
 	g := &rig{t: t, o: o, bodies: map[int][]byte{}, ctypes: map[int]string{}, uriTimes: map[int]time.Time{}, endTimes: map[int]time.Time{}}
-	upnp.ReconnectGrace = 400 * time.Millisecond
 
 	// LMS's stream server: GET /<n> returns track n.
 	hln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -163,6 +171,9 @@ func newRig(t *testing.T, o rigOptions) *rig {
 		if err != nil {
 			return
 		}
+		g.mu.Lock()
+		g.lms = c
+		g.mu.Unlock()
 		frame := func(op string, d []byte) []byte {
 			return append(append(binary.BigEndian.AppendUint16(nil, uint16(4+len(d))), op...), d...)
 		}
@@ -236,6 +247,16 @@ func newRig(t *testing.T, o rigOptions) *rig {
 			if !o.noFetch {
 				go g.fetch(uri, idx)
 			}
+		case "Pause":
+			if o.closeOnPause {
+				g.mu.Lock()
+				cs := g.cancels
+				g.cancels = nil
+				g.mu.Unlock()
+				for _, cancel := range cs {
+					cancel()
+				}
+			}
 		case "GetTransportInfo":
 			resp += `<u:GetTransportInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"><CurrentTransportState>` + state + `</CurrentTransportState></u:GetTransportInfoResponse>`
 		}
@@ -255,7 +276,8 @@ func newRig(t *testing.T, o rigOptions) *rig {
 		Decoder: &decode.Decoder{OutRate: 48000}, Finder: finder,
 		NoResample: o.noResample, Passthrough: o.passthrough, Web: player.WebConfig{Port: o.webPort}, ReplayGain: true,
 	})
-	g.out = New(g.c, r, Options{Name: "T", Idle: 30 * time.Second, VolMax: 100, AutoResume: o.autoResume, RotateBytes: o.rotate, OnNetFail: o.netFail, ICY: o.icy})
+	g.out = New(g.c, r, Options{Name: "T", Idle: 30 * time.Second, VolMax: 100, AutoResume: o.autoResume, RotateBytes: o.rotate, OnNetFail: o.netFail, ICY: o.icy,
+		AutoResumeMax: o.resumeMax, AutoResumeWindow: time.Minute, OnResumeLimit: o.resumeLimit})
 	g.c.SetOutput(g.out)
 	sln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -276,7 +298,12 @@ func (g *rig) fetch(uri string, idx int) {
 		g.endTimes[idx] = time.Now()
 		g.mu.Unlock()
 	}()
-	req, _ := http.NewRequest("GET", uri, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	g.mu.Lock()
+	g.cancels = append(g.cancels, cancel)
+	g.mu.Unlock()
+	req, _ := http.NewRequestWithContext(ctx, "GET", uri, nil)
 	if g.o.icy {
 		req.Header.Set("Icy-Metadata", "1")
 	}
@@ -310,6 +337,17 @@ func (g *rig) fetch(uri string, idx int) {
 			return
 		}
 	}
+}
+
+// lmsCmd sends a strm command (p, u, q, f) from the fake LMS to the player.
+func (g *rig) lmsCmd(cmd byte) {
+	g.mu.Lock()
+	c := g.lms
+	g.mu.Unlock()
+	d := make([]byte, 24)
+	d[0] = cmd
+	frame := append(append(binary.BigEndian.AppendUint16(nil, uint16(4+len(d))), "strm"...), d...)
+	c.Write(frame)
 }
 
 func (g *rig) body(i int) []byte {

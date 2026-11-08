@@ -68,6 +68,52 @@ func (o *Out) noteRecovered() {
 	}
 }
 
+// Defaults for how many autoresumes are expected in a window; flags -autoresumemax and -autoresumewindow.
+const (
+	DefaultResumeMax    = 5
+	DefaultResumeWindow = 30 * time.Minute
+)
+
+// started is when this program started, for the autoresume totals.
+var started = time.Now()
+
+// resumeStatus describes the autoresume count: how many happened in the window, the limit, and the
+// total since the program started. mu held.
+func (o *Out) resumeStatus(now time.Time) (inWindow int, text string) {
+	keep := o.resumeTimes[:0]
+	for _, t := range o.resumeTimes {
+		if now.Sub(t) < o.resumeWindow {
+			keep = append(keep, t)
+		}
+	}
+	o.resumeTimes = keep
+	limit := "unlimited"
+	if o.resumeMax >= 0 {
+		limit = fmt.Sprint(o.resumeMax)
+	}
+	return len(keep), fmt.Sprintf("performed %d of %s autoresumes in last %s, with %d autoresumes total since goslimplayer started at %s",
+		len(keep), limit, o.resumeWindow, o.resumes, started.Format("2006-01-02 15:04:05 MST"))
+}
+
+// countResume records an autoresume, logs the running count, and reports when more happened within the
+// window than allowed, which usually means something outside the renderer needs a restart.
+func (o *Out) countResume(reason string) {
+	now := time.Now()
+	o.mu.Lock()
+	o.resumeTimes = append(o.resumeTimes, now)
+	n, text := o.resumeStatus(now)
+	o.mu.Unlock()
+	log.Printf("[%s] %s (%s)", o.name, text, reason)
+	if o.resumeMax >= 0 && n > o.resumeMax {
+		msg := fmt.Sprintf("%d autoresumes within %s is more than the %d allowed (-autoresumemax)", n, o.resumeWindow, o.resumeMax)
+		if o.onResumeLimit != nil {
+			o.onResumeLimit(msg)
+		} else {
+			log.Printf("[%s] %s", o.name, msg)
+		}
+	}
+}
+
 // Resumes is how many times a lost stream has been restarted by autoresume.
 func (o *Out) Resumes() int {
 	o.mu.Lock()
@@ -82,12 +128,13 @@ func (o *Out) logResumes() {
 	}
 	o.mu.Lock()
 	n, lost, at := o.resumes, o.lost, o.lostAt
+	_, text := o.resumeStatus(time.Now())
 	o.mu.Unlock()
 	last := ""
 	if lost > 0 {
 		last = fmt.Sprintf(", last lost stream at %s", at.Format("2006-01-02 15:04:05"))
 	}
-	log.Printf("[%s] autoresumes so far: %d (streams lost: %d%s)", o.name, n, lost, last)
+	log.Printf("[%s] autoresumes so far: %d (streams lost: %d%s); %s", o.name, n, lost, last, text)
 }
 
 // logRestartSummary prints what was kept about lost streams. It runs when the

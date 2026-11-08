@@ -43,9 +43,14 @@ type Options struct {
 	VolOffset, VolMax int
 	BufferSecs        float64 // >0: pace the stream so the renderer holds at most this much ahead of playback
 	AutoResume        bool    // start a new stream if the renderer stops pulling one
-	ICY               bool    // answer Icy-Metadata requests with track title and cover art in the stream
-	RotateBytes       int64   // replace the stream after this many bytes (0 = 3 GiB)
-	PortScan          int     // ports above the original to try if the HTTP port must be re-bound (0 = 50)
+	// AutoResumeMax autoresumes within AutoResumeWindow are expected; one more calls OnResumeLimit.
+	// A negative max means no limit; a zero window means 30 minutes.
+	AutoResumeMax    int
+	AutoResumeWindow time.Duration
+	OnResumeLimit    func(reason string) // nil = just log
+	ICY              bool                // answer Icy-Metadata requests with track title and cover art in the stream
+	RotateBytes      int64               // replace the stream after this many bytes (0 = 3 GiB)
+	PortScan         int                 // ports above the original to try if the HTTP port must be re-bound (0 = 50)
 	// Rediscover finds the renderer again (by MAC) and returns its current description, nil if it does not
 	// answer. It is used when the renderer stops answering, because a DHCP lease change may have moved it.
 	Rediscover func() *upnp.Renderer
@@ -74,6 +79,10 @@ type Out struct {
 	bufferSecs        float64
 	window            int64
 	autoResume        bool
+	resumeMax         int
+	pauseDropped      *upnp.Stream // the stream whose connection the renderer closed while LMS had it paused
+	resumeWindow      time.Duration
+	onResumeLimit     func(reason string)
 	icy               bool
 	rotateBytes       int64
 	portScan          int
@@ -109,8 +118,9 @@ type Out struct {
 
 	// what is kept about lost streams (see restarts.go)
 	history     []restart
-	lost        int // streams lost
-	resumes     int // ... of which autoresume restarted
+	lost        int         // streams lost
+	resumes     int         // ... of which autoresume restarted
+	resumeTimes []time.Time // when the autoresumes within the window happened
 	lostAt      time.Time
 	lastState   string       // last renderer transport state the poller saw
 	streamBegan time.Time    // when the current stream was started
@@ -132,6 +142,9 @@ func New(c *player.Client, r *upnp.Renderer, o Options) *Out {
 		log.Printf("[%s] a buffer of %.1fs is too small to be reliable, using 3s", o.Name, o.BufferSecs)
 		o.BufferSecs = 3
 	}
+	if o.AutoResumeWindow <= 0 {
+		o.AutoResumeWindow = DefaultResumeWindow
+	}
 	if o.RotateBytes <= 0 {
 		o.RotateBytes = defaultRotate
 	}
@@ -142,6 +155,7 @@ func New(c *player.Client, r *upnp.Renderer, o Options) *Out {
 		c: c, name: o.Name, up: upnp.NewClient(r, o.Name),
 		clen: o.Clen, idle: o.Idle, volOffset: o.VolOffset, volMax: o.VolMax,
 		bufferSecs: o.BufferSecs, window: feedWindow, autoResume: o.AutoResume, icy: o.ICY,
+		resumeMax: o.AutoResumeMax, resumeWindow: o.AutoResumeWindow, onResumeLimit: o.OnResumeLimit,
 		rotateBytes: o.RotateBytes, portScan: o.PortScan, onNetFail: o.OnNetFail, rediscover: o.Rediscover, onMoved: o.OnMoved, raw: c.Options().Passthrough,
 		cmds: make(chan func(), 64), kick: make(chan struct{}, 1),
 	}
@@ -162,6 +176,7 @@ func (o *Out) Run() {
 	if o.raw {
 		go o.pumpRaw()
 	} else {
+		o.c.EnableTailHold() // the renderer runs ahead of the speakers: see Client.EnableTailHold
 		go o.pumpPCM()
 		go o.watchdog()
 	}
@@ -195,8 +210,10 @@ func (o *Out) kickNow() {
 
 // wait sleeps until there may be something to do: more audio from the player,
 // progress by the renderer, or a second has passed.
-func (o *Out) wait() {
-	t := time.NewTimer(time.Second)
+func (o *Out) wait() { o.waitFor(time.Second) }
+
+func (o *Out) waitFor(d time.Duration) {
+	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
 	case <-o.c.Done():
@@ -487,19 +504,30 @@ func (o *Out) endStream(st *upnp.Stream, reason string) {
 	// A renderer that LMS paused drops its connection (Sonos does) and the stream times out; that is not a
 	// lost stream. Keep the pause: the next audio after LMS resumes starts a new stream.
 	lmsPaused := was && !complete && o.paused && !o.extPaused
-	if was && !complete && !lmsPaused {
+	// The renderer hung up while LMS had it paused and LMS has resumed since: it will not pull this stream
+	// again, so the audio that follows goes into a new one. That is the normal cost of a pause, not a loss.
+	pauseResume := was && !complete && !lmsPaused && o.pauseDropped == st
+	if was && !complete && !lmsPaused && !pauseResume {
 		o.cur, o.paused, o.extPaused = nil, false, false
-	} else if lmsPaused {
+	} else if lmsPaused || pauseResume {
 		o.cur = nil
 	}
 	o.mu.Unlock()
 	o.consumed.Add(st.Finish(true))
+	if pauseResume {
+		log.Printf("[%s] stream %d was closed by the renderer while paused; the audio that follows starts a new stream", o.name, st.ID)
+		o.kickNow()
+		return
+	}
 	if lmsPaused {
 		log.Printf("[%s] stream %d closed while paused (%s); a new stream starts when LMS resumes", o.name, st.ID, reason)
 		return
 	}
 	if was && !complete {
 		o.recordRestart(st, reason)
+		if o.autoResume {
+			o.countResume(reason)
+		}
 		o.streamLostAt.Store(time.Now().UnixNano())
 		o.gone.Store(true)
 		o.kickNow()
@@ -629,7 +657,14 @@ func (o *Out) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Clen:     o.clen,
 		ICY:      o.icy,
 		Consumed: func(n int64) { o.consumed.Add(n); o.lastPull.Store(time.Now().UnixNano()); o.kickNow() },
-		Idle:     func(gen int) { o.armEnd(st, gen, upnp.ReconnectGrace) },
+		Idle: func(gen int) {
+			o.mu.Lock()
+			if o.paused && !o.extPaused && o.cur == st {
+				o.pauseDropped = st // Sonos hangs up when paused; the pause is why, not a fault
+			}
+			o.mu.Unlock()
+			o.armEnd(st, gen, upnp.ReconnectGrace)
+		},
 	})
 }
 

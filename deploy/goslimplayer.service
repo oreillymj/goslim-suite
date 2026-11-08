@@ -4,7 +4,10 @@
 #   sudo install -d /opt/goslimplayer /etc/goslimplayer
 #   sudo install goslimplayer /opt/goslimplayer/            (gunzip the release file first)
 #   sudo install -m 640 -o root -g goslim config.json /etc/goslimplayer/
-#   sudo chown goslim:root /etc/goslimplayer/config.json
+#   # the program rewrites the "ip" in config.json when DHCP moves a speaker, so the directory and file belong to goslim
+#   # (and the unit's ReadWritePaths= below lets it past ProtectSystem=strict):
+#   sudo chown goslim:root /etc/goslimplayer /etc/goslimplayer/config.json
+#   sudo chmod 750 /etc/goslimplayer
 #   sudo chown goslim:root /opt/goslimplayer/goslimplayer
 #   sudo chmod +x /opt/goslimplayer/goslimplayer
 #   sudo cp goslimplayer.service /etc/systemd/system/
@@ -25,7 +28,7 @@ Type=simple
 User=goslim
 Group=goslim
 # systemd adds its own timestamps, so turn ours off.
-ExecStart=/opt/goslimplayer/goslimplayer  -u /etc/goslimplayer/config.json -autoresume -logtime=false -exitonnetfail
+ExecStart=/opt/goslimplayer/goslimplayer -u /etc/goslimplayer/config.json -logtime=false -exitonnetfail
 # systemd sends SIGTERM; the program leaves LMS, stops the speakers and exits within a few seconds.
 KillSignal=SIGTERM
 TimeoutStopSec=15
@@ -34,9 +37,14 @@ TimeoutStopSec=15
 Restart=on-failure
 RestartSec=5
 
+# -stalltimeout (default 10m) does the same when a renderer drops its stream and LMS never reacts: the player
+# exits with an error and this restarts it, instead of sitting there while LMS shows the track as playing.
+
 # Hardening: it only needs the network.
 NoNewPrivileges=true
 ProtectSystem=strict
+# The program updates the "ip" fields of config.json when DHCP moves a renderer. It writes a temporary file in
+# the same directory and renames it, so the directory must be writable (and owned by goslim: chown goslim:root).
 ReadWritePaths=/etc/goslimplayer
 ProtectHome=true
 PrivateTmp=true

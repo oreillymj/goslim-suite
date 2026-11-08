@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"goslim/internal/player"
 	"goslim/internal/upnp"
 )
 
@@ -34,6 +35,12 @@ func (o *Out) pumpPCM() {
 
 		g0 := o.flushGen.Load()
 		r := c.Pull(buf)
+		if r.Held && o.Inflight() < o.window/2 {
+			// The end of the last track is being kept back in case LMS asks for a crossfade into a next
+			// one, but the renderer is running out of audio: nothing is coming, so let the end play.
+			c.ReleaseHold()
+			continue
+		}
 		base := o.sent.Load()
 		if r.N > 0 {
 			rate := r.Rate
@@ -60,7 +67,11 @@ func (o *Out) pumpPCM() {
 			o.pendingEnd.Store(true)
 		}
 		if r.N == 0 && r.Ended == 0 && !r.Emptied {
-			o.wait()
+			if r.Held {
+				o.waitFor(player.HoldPoll)
+			} else {
+				o.wait()
+			}
 		}
 	}
 }

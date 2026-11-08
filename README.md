@@ -29,7 +29,7 @@ internal/mdns       small mDNS/DNS-SD responder and browser (the proxy port anno
 internal/uclient    goupnpaudioclient's engine
 docker/             Dockerfile for building in a Go 1.26 container
 hack/               build.sh, build.bat, docker_build.sh, itest.py, formats/gen.py (test files for the format table)
-deploy/             systemd units, NSSM install script
+deploy/             systemd units, install.sh (Linux), NSSM install script
 dist/               build output (git-ignored)
 ```
 
@@ -223,6 +223,11 @@ stereo, bit-exact at 3805× / 2703× / 2796× / 1227× / 8308× / 5640× for the
 
 ### Libraries, licences and Go version
 
+Every program has `-about`, which lists the open source projects built into that binary (taken from the module versions the
+binary was built with) with their licences, and `-licenses`, which adds the full licence texts. The texts are embedded copies from
+`internal/about/licenses/`; when a dependency is added or upgraded, update `internal/about/about.go` and that folder (a test fails
+if a linked module is missing from the list).
+
 * **AAC** is [go-aac](https://github.com/tphakala/go-aac) (a port of FFmpeg's fixed-point AAC-LC decoder), licensed
   **LGPL-2.1-or-later**. Using it unmodified as a dependency is fine for personal use; if you distribute binaries,
   the LGPL's terms (offering the library's source, allowing relinking) apply to them. It requires **Go 1.26 or
@@ -330,8 +335,32 @@ Per-player keys (all optional; a missing key uses the matching command-line flag
 The defaults are `decodeaudio` and `resampleaudio` on, `autoresume` and `icy` off (flags `-decodeaudio`, `-resampleaudio`,
 `-autoresume`, `-icy`). `-exitonnetfail` (default off; on in the systemd unit) makes the program exit with an error when a
 renderer never fetches its stream (`renderer never fetched stream … firewall? wrong network?`), so systemd restarts
-it every 5 s until the network is right. `-v` (also on `goslim`) logs each track's type, bitrate/VBR and sample rate, the LMS volume
+it every 5 s until the network is right. `-stalltimeout` (default `10m`, `0` = off) covers a renderer that drops its stream (for example after a network
+glitch) without LMS reacting: the program logs `stalled: …` and exits with an error so systemd restarts it. Pausing, resuming or
+stopping in LMS counts as a reaction, so a deliberate pause is not restarted. `-v` (also on `goslim`) logs each track's type, bitrate/VBR and sample rate, the LMS volume
 whenever it is sent to the renderer, and per-minute stream statistics.
+
+**Renderers that open a stream twice.** GStreamer-based renderers (for example the Platin Hub, `User-Agent: GStreamer souphttpsrc`)
+open the stream URL, close it and open it again to play. If the renderer comes back within `-reconnectreplay` (default `3s`, flag on
+`goslimplayer` and `goupnpaudioclient`) of its first request, it gets the stream from the start again, whatever the track length or
+however much the first connection read, as long as the start is still held in memory. Later reconnects carry on from where the stream
+had got to. `-reconnectreplay=0` switches this off; `-v` logs each request's `User-Agent` so you can see what the renderer is. With `-v` every start-stream command from LMS is also logged in full (`strm start header: …`: transition type and length, flags, output threshold, replay gain and the raw bytes).
+
+**Crossfade and fades between tracks.** `goslimplayer` carries out the transition LMS asks for in Settings > Player > Audio
+(*Crossfade*, up to the 10 s maximum, *Smart crossfade*, *Don't crossfade between different sample rates*). LMS makes every decision
+- crossfade is skipped between neighbouring tracks of one album when smart crossfade is on, a short track gets a shorter fade
+(a third of its length), and the sleep timer suppresses it at the end of a track - and puts the result in the start-stream command
+(`-v` shows it as `transition '1' (crossfade) over 10 s`); GoSlim only does what the command says. With a crossfade the last
+N seconds of the playing track are mixed with the first N seconds of the next, so the next track starts N seconds early; *fade in*
+fades the start of a track, *fade out* the end of a track, and *fade in and out* the end of a track and the start of the next, each over half the time (this follows Squeezelite's `output.c`). Because a renderer buffers audio well ahead of the speakers,
+the end of a track is held back until LMS has said what follows (it is released early when nothing arrives and the renderer is
+running low, so the last track of a playlist is never cut short). Not possible, and skipped with a log line, in `-passthrough`
+mode or when two tracks have different sample rates with resampling off. `-crossfade=false` joins tracks without any transition.
+By default the gain curves are linear in amplitude, exactly as in Squeezelite (`output.c` / `output_pack.c`: the new track's gain is
+`position/length`, the old track's is `1 - that`); LMS's dB curve is only used for the volume setting, which LMS applies itself.
+`-crossfadecurve` changes the curve of crossfades and fades: `linear` (default), `power` (constant power, so two unrelated tracks
+do not dip in the middle: the usual choice for a crossfade) or `log` (a 40 dB ramp that follows loudness perception; both tracks are
+20 dB down in the middle of a crossfade, so it leaves a clear dip and suits fades in and out better than crossfades).
 
 **Lost streams and autoresume.** Whenever a renderer's stream is lost unexpectedly (it disconnects, or reports STOPPED
 without ending the stream), `goslimplayer` keeps a record of the moment: time, reason, stream number, stream age, bytes
@@ -340,6 +369,24 @@ renderer last pulled audio, track count, whether paused, whether autoresume rest
 took to answer again. The last 100 are printed as a `restart summary` when the player closes (Ctrl-C or SIGTERM), so
 an overnight run can be reviewed for a pattern. With `-v`, a line `autoresumes so far: N (streams lost: M, last lost
 stream at …)` is logged at each track change, and a summary saying nothing was lost is printed at the end if so.
+
+**Limiting autoresumes.** `-autoresumemax N` (default `5`) and `-autoresumewindow D` (default `30m`) say how many autoresumes
+are expected within a rolling window; `-1` means no limit. Every autoresume logs the running count:
+
+```
+[SunL] performed 2 of 5 autoresumes in last 30m0s, with 12 autoresumes total since goslimplayer started at 2026-11-05 07:55:00 GMT (renderer disconnected …)
+```
+
+Autoresumes older than the window drop out of the count (a quiet half hour brings it back to 0); the total since the program
+started is kept in memory only, so it starts again at 0 after a restart. When one more autoresume than allowed happens within
+the window the program logs it and, **if `-exitonnetfail` is set**, exits with an error so a service manager such as systemd
+restarts it (all players in the process restart together). Without `-exitonnetfail` it only logs. The two options do not
+conflict: `-exitonnetfail` also exits when a renderer never fetches a stream at all (firewall, wrong network), which
+autoresume alone would retry forever. `-autoresume=false` stays off whatever the other options say.
+
+**Pause, power off and resume.** LMS's power off normally pauses the player, and the Sonos drops its stream connection when
+paused. That is not a lost stream and is not counted as an autoresume, whether LMS resumes within seconds or hours: the audio
+that follows is simply sent in a new stream (`stream N was closed by the renderer while paused …`).
 
 ### ICY metadata (track title and cover art)
 
@@ -364,6 +411,19 @@ Things to know:
   (only the first block of a fresh stream can ever stall, and only when the renderer asks before LMS has answered).
 * Only `StreamTitle` and `StreamUrl` are sent. The UPnP metadata given to the renderer (DIDL-Lite) is unchanged.
 
+**Renderer addresses.** Players are found by `mac`, never by address: the `ip`, `devicename` and `model` keys that
+`-jsonfile` writes are only for reading. Speakers usually get their address from DHCP, so each time a player's renderer is
+found at startup, `goslimplayer` compares its current address with the file's `ip` and, if it differs, rewrites just
+that value (nothing else in the file changes) and logs `the renderer's address has changed from … to …`. A player
+without an `ip` key is left alone, and a file that cannot be written (read-only, no permission) only produces a warning.
+
+A renderer that changes address while the program runs is followed too: when it has not answered for about 15 s, or lost its
+stream, it is searched for again by MAC and, if it has moved, the output switches to the new address (`the renderer has moved
+from … to …`) and the file is updated. Under systemd the config directory must be writable by the service user, because the
+file is replaced through a temporary file in the same directory: `sudo chown goslim:root /etc/goslimplayer && sudo chmod 750
+/etc/goslimplayer`, plus `ReadWritePaths=/etc/goslimplayer` in the unit (the shipped unit and `deploy/install.sh` have both).
+Without them the log says `read-only file system`, which is systemd's `ProtectSystem=strict`, not file ownership.
+
 `goslimplayer -jsonfile` lists the renderers and writes a skeleton. Every entry needs the `name` key (it may be
 empty to use the renderer's own name) and a `mac`. `server` is optional; without it, and without `-server`, LMS
 is found by broadcast once and shared by all players.
@@ -373,7 +433,9 @@ is found by broadcast once and shared by all players.
 The programs stop cleanly on SIGINT/SIGTERM: they leave LMS, stop the speakers and exit within seconds. That is
 what systemd sends, and what NSSM sends a console program, so no service-specific code is needed.
 
-* **Linux**: `deploy/goslimplayer.service` (steps in its header). The hardening section allows `AF_NETLINK`,
+* **Linux**: `sudo deploy/install.sh [goslimplayer[.gz]] [config.json]` creates the `goslim` user, installs the binary and config
+  (an existing config is kept) and enables and starts the service; it refuses to run unless root or sudo. The manual steps are in the
+  header of `deploy/goslimplayer.service`. The hardening section allows `AF_NETLINK`,
   which SSDP discovery needs; if discovery still fails, add `AF_PACKET` to `RestrictAddressFamilies`. Logs go to `journalctl -u goslimplayer`.
 * **Windows**: edit `INSTALLDIR` in `deploy/install-nssm.bat` and run it as administrator.
 

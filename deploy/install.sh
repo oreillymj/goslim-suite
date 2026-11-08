@@ -64,8 +64,10 @@ else
   echo "==> $CONF_DIR/config.json (from $conf)"
   install -m 640 -o "$USER_NAME" -g root "$conf" "$CONF_DIR/config.json"
 fi
-# The program writes renderer IP changes back to config.json, so the service user owns it.
-chown "$USER_NAME":root "$CONF_DIR/config.json"
+# The program writes renderer IP changes back to config.json (a temporary file in the same directory, then a
+# rename), so the service user owns the directory and the file; the unit allows writes there (ReadWritePaths).
+chown "$USER_NAME":root "$CONF_DIR" "$CONF_DIR/config.json"
+chmod 750 "$CONF_DIR"
 
 echo "==> $UNIT"
 install -m 644 "$here/goslimplayer.service" "$UNIT"

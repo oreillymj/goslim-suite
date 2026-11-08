@@ -8,6 +8,8 @@ type PullResult struct {
 	Emptied bool  // the queue ran dry (playback finished)
 	Starts  []int // byte offsets in p where tracks began
 
+	Held bool // nothing was returned because the end of the last track is being held back for a crossfade (see ReleaseHold)
+
 	Rate   int  // sample rate of the PCM in p; 0 if nothing was copied (raw bytes carry no rate)
 	Raw    bool // p holds the undecoded bytes of one track (passthrough mode)
 	Format byte // format letter of that raw track
@@ -29,6 +31,20 @@ func (c *Client) Pull(p []byte) (r PullResult) {
 	}
 	var first *track
 	for r.N < len(p) && len(c.queue) > 0 {
+		if c.mix != nil { // a crossfade is running: mix the end of one track with the start of the next
+			n, _ := c.mixStep(p[r.N:], &r)
+			if n == 0 && c.mix != nil {
+				break // the next track's decoder hasn't kept up
+			}
+			if n > 0 {
+				r.Rate = int(c.queue[0].rate.Load())
+				if r.Rate == 0 {
+					r.Rate = c.outRate
+				}
+			}
+			r.N += n
+			continue
+		}
 		t := c.queue[0]
 		if t.raw {
 			if first != nil && t != first {
@@ -47,6 +63,21 @@ func (c *Client) Pull(p []byte) (r PullResult) {
 				r.Rate = rate
 			}
 		}
+		limit := len(p) - r.N
+		if !t.raw {
+			lim, mixWith, held := c.pullTail(t)
+			if mixWith != nil {
+				c.startMix(t, mixWith)
+				continue
+			}
+			if held {
+				r.Held = true
+				break
+			}
+			if lim >= 0 && lim < limit {
+				limit = lim
+			}
+		}
 		first = t
 		if !t.started {
 			t.started = true
@@ -54,11 +85,15 @@ func (c *Client) Pull(p []byte) (r PullResult) {
 			r.Starts = append(r.Starts, r.N)
 			go c.stat("STMs", 0)
 		}
-		n := t.buf.read(p[r.N:])
+		n := t.buf.read(p[r.N : r.N+limit])
+		if n > 0 && !t.raw {
+			c.shape(t, p[r.N:r.N+n])
+		}
 		r.N += n
 		t.played += int64(n)
 		if n == 0 {
 			if t.buf.finished() {
+				c.trackEnded(t)
 				c.queue = c.queue[1:]
 				r.Ended++
 				if len(c.queue) == 0 {

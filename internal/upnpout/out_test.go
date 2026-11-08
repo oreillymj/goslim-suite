@@ -395,3 +395,88 @@ func TestReplayGainAppliedAndLogged(t *testing.T) {
 		t.Errorf("the replay gain was not logged:\n%s", logs.String())
 	}
 }
+
+// The autoresume count is kept over a window, logged, and one autoresume more than allowed calls OnResumeLimit.
+func TestAutoResumeLimit(t *testing.T) {
+	var logs syncBuf
+	log.SetOutput(&logs)
+	defer log.SetOutput(io.Discard)
+
+	hit := make(chan string, 4)
+	long := []testTrack{{'p', testWAV(48000, 30.0)}}
+	// Allowed: 0 within the window, so the first autoresume is already one too many.
+	g := newRig(t, rigOptions{tracks: long, dropAfter: 60_000, autoResume: true, resumeMax: 0, resumeLimit: func(s string) { hit <- s }})
+	select {
+	case s := <-hit:
+		if !strings.Contains(s, "1 autoresumes within 1m0s is more than the 0 allowed") {
+			t.Errorf("limit message: %q", s)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatalf("OnResumeLimit was not called:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "performed 1 of 0 autoresumes in last 1m0s, with 1 autoresumes total since goslimplayer started at ") {
+		t.Errorf("running count not logged:\n%s", logs.String())
+	}
+	_ = g
+
+	// -1 is unlimited: the same loss does not trigger the limit.
+	g2 := newRig(t, rigOptions{tracks: long, dropAfter: 60_000, autoResume: true, resumeMax: -1, resumeLimit: func(s string) { hit <- "unexpected: " + s }})
+	waitFor(t, "a second stream", 15*time.Second, func() bool { return g2.count("SetAVTransportURI") >= 2 })
+	select {
+	case s := <-hit:
+		t.Errorf("limit reached with no limit set: %s", s)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// Old autoresumes drop out of the count once they are older than the window.
+func TestAutoResumeWindowExpires(t *testing.T) {
+	g := newRig(t, rigOptions{idleOnly: true, autoResume: true, resumeMax: 5})
+	o := g.out
+	o.mu.Lock()
+	o.resumeTimes = []time.Time{time.Now().Add(-2 * time.Minute), time.Now().Add(-10 * time.Second)}
+	o.resumes = 7
+	n, text := o.resumeStatus(time.Now())
+	o.mu.Unlock()
+	if n != 1 || !strings.Contains(text, "performed 1 of 5 autoresumes in last 1m0s, with 7 autoresumes total") {
+		t.Errorf("n=%d %q", n, text)
+	}
+}
+
+// Power off in LMS pauses the player (and on again may resume it). The Sonos drops its stream connection when
+// paused; none of this is a lost stream, so autoresume must not count it.
+func TestPauseResumeIsNotALostStream(t *testing.T) {
+	long := []testTrack{{'p', testWAV(48000, 30.0)}}
+	for _, tc := range []struct {
+		name  string
+		pause time.Duration // how long LMS leaves the player paused
+	}{{"resume at once", 100 * time.Millisecond}, {"resume after the stream timed out", 1500 * time.Millisecond}} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newRig(t, rigOptions{tracks: long, autoResume: true, resumeMax: -1, closeOnPause: true})
+			waitFor(t, "the first stream", 10*time.Second, func() bool { return len(g.body(0)) > 100_000 })
+			g.lmsCmd('p')
+			time.Sleep(tc.pause)
+			g.lmsCmd('u')
+			waitFor(t, "playback to carry on", 10*time.Second, func() bool { return g.count("Play") >= 2 || g.count("SetAVTransportURI") >= 2 })
+			time.Sleep(1200 * time.Millisecond)
+			if n := g.out.Resumes(); n != 0 {
+				t.Errorf("%d autoresumes after a pause and resume from LMS", n)
+			}
+			if g.has("STMp") && g.count("SetAVTransportURI") > 2 {
+				t.Errorf("too many streams: %d", g.count("SetAVTransportURI"))
+			}
+		})
+	}
+}
+
+// Stop then start (power off, power on with a playlist) is not a lost stream either.
+func TestStopStartIsNotALostStream(t *testing.T) {
+	long := []testTrack{{'p', testWAV(48000, 30.0)}, {'p', testWAV(48000, 30.0)}}
+	g := newRig(t, rigOptions{tracks: long, autoResume: true, resumeMax: -1, closeOnPause: true})
+	waitFor(t, "the first stream", 10*time.Second, func() bool { return len(g.body(0)) > 100_000 })
+	g.lmsCmd('q')
+	time.Sleep(1500 * time.Millisecond)
+	if n := g.out.Resumes(); n != 0 {
+		t.Errorf("%d autoresumes after a stop from LMS", n)
+	}
+}

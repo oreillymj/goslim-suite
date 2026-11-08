@@ -37,6 +37,9 @@ func run(ctx context.Context, f *flags) error {
 
 // playerOptions are the settings common to every player this command creates.
 func playerOptions(f *flags, finder *lms.Finder, name string, mac net.HardwareAddr) (player.Options, error) {
+	if _, err := player.ParseCurve(f.curve); err != nil {
+		return player.Options{}, fmt.Errorf("-crossfadecurve: %w", err)
+	}
 	dec := &decode.Decoder{OutRate: f.rate, NoNativeAAC: !f.nativeAAC, NoNativeALAC: !f.nativeALAC, NoNativeVorbis: !f.nativeOgg}
 	if f.ffmpeg != "" {
 		p, err := decode.FindFFmpeg(f.ffmpeg)
@@ -47,7 +50,7 @@ func playerOptions(f *flags, finder *lms.Finder, name string, mac net.HardwareAd
 	}
 	return player.Options{
 		Name: name, MAC: mac, OutRate: f.rate, MaxRate: f.maxRate, Decoder: dec, Finder: finder,
-		ReplayGain: f.replayGain, Verbose: f.verbose, Web: player.WebConfig{Port: f.webPort, User: f.webUser, Pass: f.webPass},
+		ReplayGain: f.replayGain, NoTransitions: !f.crossfade, CrossfadeCurve: f.curve, Verbose: f.verbose, Web: player.WebConfig{Port: f.webPort, User: f.webUser, Pass: f.webPass},
 	}, nil
 }
 
@@ -336,6 +339,13 @@ func startPlayer(ctx context.Context, cancel context.CancelCauseFunc, f *flags, 
 			cancel(fmt.Errorf("[%s] %s", name, reason))
 		}
 	}
+	var onResumeLimit func(string)
+	if f.exitOnNetFail {
+		onResumeLimit = func(reason string) {
+			log.Printf("[%s] %s: exiting so the service manager can restart the program", name, reason)
+			cancel(fmt.Errorf("[%s] %s", name, reason))
+		}
+	}
 	out := upnpout.New(c, r, upnpout.Options{
 		OnNetFail: onNetFail,
 		Rediscover: func() *upnp.Renderer {
@@ -351,15 +361,27 @@ func startPlayer(ctx context.Context, cancel context.CancelCauseFunc, f *flags, 
 				log.Printf("[%s] cannot update the ip in %s: %v", name, f.configFile, err)
 			}
 		},
+		AutoResumeMax: f.resumeMax, AutoResumeWindow: f.resumeWindow, OnResumeLimit: onResumeLimit,
 		Name: name, Clen: f.clen, Idle: f.idle, VolOffset: vo, VolMax: vm, BufferSecs: buf, AutoResume: autoResume, ICY: icy,
 	})
 	c.SetOutput(out)
 	out.Serve(ln)
 	out.Run()
-	log.Printf("[%s] renderer %q at %s, MAC %s, serving audio on port %d, volume offset %+d, max %d, buffer %s, %s, autoresume %v, icy metadata %v",
-		name, r.Name, r.IP, pc.MAC, ln.Addr().(*net.TCPAddr).Port, vo, vm, bufferText(buf), audioMode(decodeAudio, resampleAudio), autoResume, icy)
+	log.Printf("[%s] renderer %q at %s, MAC %s, serving audio on port %d, volume offset %+d, max %d, buffer %s, %s, autoresume %s, icy metadata %v",
+		name, r.Name, r.IP, pc.MAC, ln.Addr().(*net.TCPAddr).Port, vo, vm, bufferText(buf), audioMode(decodeAudio, resampleAudio), autoResumeText(autoResume, f), icy)
 	go c.Loop()
 	return upnpPlayer{client: c}, true
+}
+
+// autoResumeText describes the autoresume setting for the startup line.
+func autoResumeText(on bool, f *flags) string {
+	if !on {
+		return "false"
+	}
+	if f.resumeMax < 0 {
+		return "true (no limit)"
+	}
+	return fmt.Sprintf("true (max %d per %s%s)", f.resumeMax, f.resumeWindow, map[bool]string{true: ", then exit", false: ""}[f.exitOnNetFail])
 }
 
 func audioMode(decode, resample bool) string {

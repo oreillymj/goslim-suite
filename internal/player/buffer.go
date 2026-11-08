@@ -51,6 +51,7 @@ func (b *pcmBuf) read(p []byte) int {
 
 func (b *pcmBuf) len() int       { b.mu.Lock(); defer b.mu.Unlock(); return len(b.data) }
 func (b *pcmBuf) finished() bool { b.mu.Lock(); defer b.mu.Unlock(); return b.done && len(b.data) == 0 }
+func (b *pcmBuf) complete() bool { b.mu.Lock(); defer b.mu.Unlock(); return b.done }
 func (b *pcmBuf) isClosed() bool { b.mu.Lock(); defer b.mu.Unlock(); return b.closed }
 func (b *pcmBuf) finish()        { b.mu.Lock(); b.done = true; b.mu.Unlock() }
 func (b *pcmBuf) close()         { b.mu.Lock(); b.closed = true; b.cond.Broadcast(); b.mu.Unlock() }

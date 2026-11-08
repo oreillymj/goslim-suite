@@ -44,6 +44,9 @@ type Options struct {
 	NoResample  bool // keep each track's own sample rate instead of resampling to OutRate
 	Verbose     bool // log what each track is
 
+	CrossfadeCurve string // gain curve of crossfades and fades: "linear" (default, as Squeezelite), "power" or "log"
+	NoTransitions  bool   // ignore the crossfade / fade in / fade out LMS asks for (the tracks are joined without a transition)
+
 	// StallTimeout and OnStall: when the output loses its stream (the renderer stopped pulling it) and LMS
 	// does not react (no pause, play, stop or new track) within StallTimeout, OnStall is called with the
 	// reason. LMS then still shows the track as playing while nothing reaches the speakers and nothing
@@ -65,6 +68,9 @@ type track struct {
 	rate      atomic.Int32 // sample rate of the PCM in buf, set by the first decoded audio
 	raw       bool         // buf holds the undecoded stream (passthrough)
 	format    byte         // format letter
+
+	trans       transition // what LMS asked for as this track starts (crossfade, fade in ...)
+	xfadeLogged bool
 }
 
 // Client is one Slimproto player.
@@ -89,6 +95,13 @@ type Client struct {
 	volume  float64
 	lostAt  time.Time // when the output lost its stream and LMS has not reacted since; zero otherwise
 
+	mix         *mixState // crossfade in progress
+	armSecs     int       // the longest transition LMS has asked for: how much of a track's end is held back
+	holdTail    bool      // keep that much of the last decoded track back until LMS says what follows (see EnableTailHold)
+	holdRelease bool      // the output gave up waiting for a next track
+	curve       curve     // gain curve of transitions
+	fadeUp      int       // bytes over which the next track fades in after a fade in-out
+
 	bytesRecv atomic.Uint64
 }
 
@@ -100,8 +113,13 @@ func New(o Options) *Client {
 	if o.Decoder == nil {
 		o.Decoder = &decode.Decoder{OutRate: o.OutRate}
 	}
+	cv := curveLinear
+	if f, err := ParseCurve(o.CrossfadeCurve); err == nil {
+		cv = f
+	}
 	return &Client{
-		opts: o, name: o.Name, mac: o.MAC, outRate: o.OutRate, finder: o.Finder,
+		curve: cv,
+		opts:  o, name: o.Name, mac: o.MAC, outRate: o.OutRate, finder: o.Finder,
 		start: time.Now(), quit: make(chan struct{}), wake: make(chan struct{}, 1), volume: 1,
 	}
 }
@@ -310,6 +328,9 @@ func (c *Client) flush() {
 	q := c.queue
 	c.queue = nil
 	c.playing = false
+	c.mix = nil
+	c.fadeUp = 0
+	c.holdRelease = false
 	c.mu.Unlock()
 	for _, t := range q {
 		t.buf.close()
@@ -377,6 +398,7 @@ func (c *Client) handleStrm(d []byte) {
 	case 's':
 		c.startStream(d)
 	case 'p':
+		c.lmsCommand("PAUSE", fmt.Sprintf("interval %d ms", binary.BigEndian.Uint32(d[14:18])))
 		c.mu.Lock()
 		c.playing = false
 		c.mu.Unlock()
@@ -385,6 +407,7 @@ func (c *Client) handleStrm(d []byte) {
 		}
 		c.stat("STMp", 0)
 	case 'u':
+		c.lmsCommand("PLAY (resume)", fmt.Sprintf("interval %d ms", binary.BigEndian.Uint32(d[14:18])))
 		c.mu.Lock()
 		c.playing = len(c.queue) > 0
 		c.mu.Unlock()
@@ -394,15 +417,51 @@ func (c *Client) handleStrm(d []byte) {
 		}
 		c.stat("STMr", 0)
 	case 'q', 'f':
+		c.lmsCommand(map[byte]string{'q': "STOP", 'f': "FLUSH"}[d[0]], "")
 		c.flush()
 		c.stat("STMf", 0)
 	case 't':
 		c.stat("STMt", binary.BigEndian.Uint32(d[14:18]))
+	default:
+		c.lmsCommand(fmt.Sprintf("strm %q (not supported, ignored)", d[0]), "")
 	}
+}
+
+// logStrmHeader (-v) prints every field of a start-stream command, including the ones GoSlim does
+// not act on (transition, flags, output threshold), so that an LMS setting can be changed and the
+// effect on the wire seen.
+func (c *Client) logStrmHeader(d []byte) {
+	n := len(d)
+	if n > 24 {
+		n = 24
+	}
+	log.Printf("[%s] strm start header: autostart %q, format %q, pcm %q/%q/%q/%q, buffer threshold %d KB, spdif %d, "+
+		"transition %s over %d s, flags 0x%02x, output threshold %d (x0.1 s), reserved 0x%02x, replay gain 0x%08x, server %s:%d; raw % x",
+		c.name, d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], transitionName(d[10]), d[9], d[11], d[12], d[13],
+		binary.BigEndian.Uint32(d[14:18]), net.IP(d[20:24]), binary.BigEndian.Uint16(d[18:20]), d[:n])
+}
+
+// lmsCommand logs a playback command received from LMS in a form that is easy to find in the log.
+func (c *Client) lmsCommand(name, detail string) {
+	if detail != "" {
+		detail = " (" + detail + ")"
+	}
+	log.Printf("[%s] ==> Received %s command from LMS%s", c.name, name, detail)
 }
 
 func (c *Client) startStream(d []byte) {
 	autostart, format := d[1], d[2]
+	c.mu.Lock()
+	queued := len(c.queue)
+	c.mu.Unlock()
+	cmd := "START TRACK"
+	if queued > 0 {
+		cmd = "NEXT TRACK" // queued behind the one that is playing
+	}
+	c.lmsCommand(cmd, fmt.Sprintf("format %q, autostart %q, %d track(s) already queued", format, autostart, queued))
+	if c.opts.Verbose {
+		c.logStrmHeader(d)
+	}
 	if !c.opts.Decoder.Supported(format) {
 		log.Printf("unsupported format %q", format)
 		c.stat("STMn", 0)
@@ -446,8 +505,13 @@ func (c *Client) startStream(d []byte) {
 	if len(c.queue) == 0 {
 		c.playing = autostart == '1' || autostart == '3'
 	}
+	c.noteTransition(t, d)
+	c.holdRelease = false
 	c.queue = append(c.queue, t)
 	c.mu.Unlock()
+	if t.trans.kind != '0' {
+		log.Printf("[%s] LMS asks for a transition into this track: %s", c.name, transitionText(t.trans))
+	}
 
 	c.signal()
 	c.stat("STMc", 0)
